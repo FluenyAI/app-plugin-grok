@@ -1,0 +1,50 @@
+{
+  "description": "Flueny's sensor. Extraction runs on this machine and only derived signal is sent: no prompt text, no code, no file contents, no tool output. Every hook is type command for that reason, because an http hook would post the raw payload off the machine. Hooks fail open and print nothing, so a Flueny outage never interferes with a session.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/flueny-hook.sh\" session-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/flueny-hook.sh\" post-tool-use",
+            "timeout": 10
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/flueny-hook.sh\" stop",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/flueny-hook.sh\" session-end",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

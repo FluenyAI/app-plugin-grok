@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "plugins": {
+    "flueny": {
+      "components": {
+        "commands": [
+          {
+            "name": "connect",
+            "description": "Connect this machine to Flueny (device sign-in, no bash required)"
+          },
+          {
+            "name": "flueny",
+            "description": "What Flueny is measuring on this machine, and how to connect it"
+          },
+          {
+            "name": "status",
+            "description": "Check whether Flueny is actually receiving anything from this machine"
+          }
+        ],
+        "hooks": [
+          { "name": "SessionStart" },
+          { "name": "PostToolUse" },
+          { "name": "Stop" },
+          { "name": "SessionEnd" }
+        ]
+      }
+    }
+  }
+}

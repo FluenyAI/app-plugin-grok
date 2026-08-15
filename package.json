@@ -1,0 +1,22 @@
+{
+  "name": "@flueny/plugin-grok",
+  "version": "0.1.0-spike.1",
+  "private": true,
+  "description": "P0 dogfood spike: the Grok client for the Flueny coding agent surface (feature 0028, M1)",
+  "type": "module",
+  "bin": {
+    "flueny": "./src/cli.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2"
+  }
+}

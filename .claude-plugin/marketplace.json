@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "flueny",
+  "description": "The Flueny client for Claude Code and Grok. Measures coding fluency from derived signal, with no prompt or code leaving the machine.",
+  "owner": {
+    "name": "Flueny",
+    "email": "support@flueny.ai"
+  },
+  "plugins": [
+    {
+      "name": "flueny",
+      "description": "Measures how you work with Claude Code or Grok and shows it to you first. Derived signal only, no prompts and no code.",
+      "author": { "name": "Flueny" },
+      "category": "productivity",
+      "source": "./",
+      "homepage": "https://flueny.ai",
+      "keywords": ["flueny", "flueny coding", "coding fluency"],
+      "domains": ["flueny.ai"]
+    }
+  ]
+}

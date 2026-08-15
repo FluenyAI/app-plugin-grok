@@ -1,0 +1,10 @@
+{
+  "name": "flueny",
+  "version": "0.1.0-spike.1",
+  "description": "Measures how you work with Claude Code or Grok and shows it to you first. Derived signal only: your prompts, your code and your file contents never leave this machine, and your organisation sees group aggregates rather than anything about you individually. Run /flueny:connect after installing, and /flueny:status if a repository is producing nothing.",
+  "author": {
+    "name": "Flueny",
+    "email": "support@flueny.ai"
+  },
+  "homepage": "https://flueny.ai"
+}
