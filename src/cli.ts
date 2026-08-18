@@ -10,6 +10,7 @@ import {
   sessionStart,
   startDevice,
 } from './api.ts'
+import { API_TARGETS, describeApi, resolveApiTarget } from './api-url.ts'
 import { setupConnected, weeklySummary, wrap } from './copy.ts'
 import { onPostToolUse, onSessionEnd, onSessionStart, onStop } from './hooks.ts'
 import { entriesFor, receiptFor } from './receipt.ts'
@@ -54,6 +55,8 @@ async function main(argv: string[]): Promise<number> {
       return hook(rest)
     case 'install':
       return install(rest)
+    case 'api':
+      return api(rest)
     default:
       return usage()
   }
@@ -72,6 +75,7 @@ function usage(): number {
       '',
       '  flueny login [--api-url URL] [--agent AGENT] [--label NAME]',
       '  flueny status                                 what this client is doing',
+      '  flueny api [staging|production|URL]           which Flueny this reports to',
       '  flueny dry-run --today                        what was sent today, in full',
       '  flueny install [--print]                      the hook settings to merge by hand',
       '  flueny logout                                 forget the credential',
@@ -79,6 +83,54 @@ function usage(): number {
     ].join('\n'),
   )
   return 0
+}
+
+// ---- api: which Flueny this machine reports to ----
+
+// Show the current API, or move this machine to another one.
+//
+// Switching is a re-login, not a rewrite of a stored URL: the credential is
+// minted by one environment's backend and means nothing to another, and each
+// environment holds its own installs and its own signal. So this runs the same
+// device sign-in `flueny login` does, against the chosen URL, and leaves the
+// existing credential alone until that succeeds.
+async function api(argv: string[]): Promise<number> {
+  const agent = detectAgent(flag(argv, '--agent'))
+  const creds = readCredentials(agent)
+  const target = argv.find((arg) => !arg.startsWith('--'))
+
+  if (!target) {
+    if (creds) say(`API              ${describeApi(creds.apiUrl)}`)
+    else say(`${agentLabel(agent)} is not connected on this machine.`)
+    say('')
+    say('Switch with one of:')
+    for (const [name, url] of Object.entries(API_TARGETS)) {
+      say(`  flueny api ${name.padEnd(11)} ${url}`)
+    }
+    say(`  flueny api ${'<URL>'.padEnd(11)} a local or self-hosted Flueny`)
+    return 0
+  }
+
+  const url = resolveApiTarget(target)
+  if (!url) {
+    say(`Flueny does not know an API called "${target}".`)
+    say(`Use ${Object.keys(API_TARGETS).join(' or ')}, or a full http(s) URL.`)
+    return 1
+  }
+
+  if (creds?.apiUrl === url) {
+    say(`${agentLabel(agent)} already reports to ${describeApi(url)}.`)
+    return 0
+  }
+
+  say(`Moving ${agentLabel(agent)} to ${describeApi(url)}.`)
+  if (creds) {
+    say(`It stays signed in to ${describeApi(creds.apiUrl)} until this succeeds.`)
+  }
+  say('')
+  // Sign-in overwrites this agent's credential only on success, so an abort or a
+  // failure here leaves the machine reporting where it already was.
+  return login([...argv.filter((arg) => arg !== target), '--api-url', url])
 }
 
 // ---- login: OAuth device authorization grant (CEO decision 15A) ----
