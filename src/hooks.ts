@@ -1,12 +1,14 @@
 import { extractToolFacts } from './extract.ts'
 import type { RawPayload } from './extract.ts'
 import { sweepTranscript } from './transcript.ts'
+import { sweepPromptInsightTurns } from './prompt-insight.ts'
 import { AGENT, beginSession, classifierFor, ensureSession } from './session.ts'
 import { clearSession, readSession, withSessionLock, writeSession } from './store.ts'
 import type { PendingEdit, SessionState } from './store.ts'
 import { enqueue, flush } from './queue.ts'
+import { currentToken, postInsight } from './api.ts'
 import { record } from './receipt.ts'
-import type { CodingEvent } from './types.ts'
+import type { CodingEvent, InsightSubmission } from './types.ts'
 
 // The four hooks. All of type "command", because extraction is local.
 //
@@ -100,6 +102,11 @@ export async function onStop(payload: RawPayload): Promise<HookOutcome> {
   if (state.inert) return { sent: 0, inert: true, reason: state.inertReason }
 
   const events: CodingEvent[] = []
+  // Feature 0094. Built inside the lock (turnId material must not race a
+  // concurrent Stop), sent outside it (a network call must never hold the
+  // session file lock, same reason enqueue/flush already happen after this
+  // block ends below).
+  let insightSubmissions: InsightSubmission[] = []
   withSessionLock(sessionId, () => {
     const live = readSession(sessionId) ?? state
     events.push(...settleEdits(live))
@@ -124,6 +131,26 @@ export async function onStop(payload: RawPayload): Promise<HookOutcome> {
           decision: 'rejected',
         })
       }
+
+      // Only when this developer's own effective policy is on. Everyone else
+      // takes exactly the path above and this block never runs, never reads
+      // a message body, never allocates a string that could hold one.
+      if (live.promptInsightsEnabled) {
+        const insightSweep = sweepPromptInsightTurns(transcript, live.promptInsightLineOffset)
+        live.promptInsightLineOffset = insightSweep.lineOffset
+        insightSubmissions = insightSweep.turns.map((turn) => {
+          live.promptInsightSeq += 1
+          return {
+            sessionId,
+            turnId: `insight:${sessionId}:${live.promptInsightSeq}`,
+            repoId: live.repoId,
+            pathClass: null,
+            prompt: turn.prompt,
+            response: turn.response,
+            at: new Date().toISOString(),
+          }
+        })
+      }
     }
     writeSession(live)
   })
@@ -134,7 +161,27 @@ export async function onStop(payload: RawPayload): Promise<HookOutcome> {
   // from PostToolUse, which never fires for a decline.
   record(queued, queued.filter((event) => event.decision === 'rejected').length)
   await flush()
+  await sendPromptInsights(insightSubmissions)
   return { sent: queued.length, inert: false, reason: null }
+}
+
+// Feature 0094. Best effort, one attempt, never queued to disk: `prompt` and
+// `response` exist as values only for the span of this function. A failure
+// here is a missing Description data point for this one turn, not a reason
+// to hold real content anywhere longer than one request needs it (same
+// no-retry shape as the backend's own coding-insights queue).
+async function sendPromptInsights(submissions: InsightSubmission[]): Promise<void> {
+  if (submissions.length === 0) return
+  const creds = await currentToken(AGENT)
+  if (!creds) return
+  for (const submission of submissions) {
+    try {
+      await postInsight(creds.apiUrl, creds.accessToken, submission)
+    } catch {
+      // Fire and forget. Nothing about a failed scoring pass is worth a
+      // retry loop holding this developer's words in memory any longer.
+    }
+  }
 }
 
 export async function onSessionEnd(payload: RawPayload): Promise<HookOutcome> {

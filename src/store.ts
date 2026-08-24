@@ -71,6 +71,22 @@ export interface SessionState {
   // Only ever incremented, so a synthesized event id is unique within a session
   // when Claude Code hands the hook no tool_use_id of its own.
   eventSeq: number
+  // Feature 0094. Resolved once at session start from SessionStartResponse,
+  // fail closed. Read fresh on every Stop rather than re-checked against the
+  // server, same as killSwitch/dryRun above: a policy flip mid-session takes
+  // effect on the next SessionStart, not mid-turn.
+  promptInsightsEnabled: boolean
+  // Lines of the transcript the prompt-insight sweep has already read.
+  // Separate from transcriptOffset (bytes, and a different reader entirely):
+  // the two sweeps run for different developers on different terms and must
+  // not share bookkeeping.
+  promptInsightLineOffset: number
+  // Only ever incremented. turnId material, so a resend after a crash between
+  // "sent" and "the offset was written back to disk" is at least distinguishable
+  // from a genuinely new turn on the backend's side, even though the client
+  // itself does not retry (see queue.ts's module comment for why events do,
+  // and prompt-insight.ts's caller for why this deliberately does not).
+  promptInsightSeq: number
 }
 
 export interface PendingEdit {
@@ -196,6 +212,26 @@ export function readBundle(): PolicyBundle | null {
 
 export function writeBundle(bundle: PolicyBundle): void {
   writePrivate(bundlePath(), JSON.stringify(bundle))
+}
+
+// ---- prompt-insights preference cache (feature 0094) ----
+//
+// SessionState carries the authoritative value per active session, but
+// `flueny status` runs with no session in progress, the same reason
+// bundle.json exists above: the last known answer, refreshed on every
+// handshake, so the terminal can say plainly whether scoring is on without
+// waiting on a fresh network round trip.
+
+function promptInsightsPath(): string {
+  return join(ensureDir(configDir()), 'prompt-insights.json')
+}
+
+export function readPromptInsightsEnabled(): boolean {
+  return readJson<{ enabled: boolean }>(promptInsightsPath())?.enabled ?? false
+}
+
+export function writePromptInsightsEnabled(enabled: boolean): void {
+  writePrivate(promptInsightsPath(), JSON.stringify({ enabled }))
 }
 
 // ---- per-session state ----

@@ -2,7 +2,7 @@ import { CLIENT_VERSION, currentToken, isOk, refresh, sessionStart } from './api
 import type { Credentials } from './store.ts'
 import { findRepo } from './git.ts'
 import { repoIdFor } from './repo-id.ts'
-import { readBundle, readSession, writeBundle, writeSession } from './store.ts'
+import { readBundle, readSession, writeBundle, writePromptInsightsEnabled, writeSession } from './store.ts'
 import type { SessionState } from './store.ts'
 import type { AgentId, PolicyBundle, SessionStartResponse } from './types.ts'
 import { readsLocallyDeclaration } from './reads.ts'
@@ -70,6 +70,9 @@ export async function beginSession(opts: {
     seenToolUseIds: [],
     transcriptOffset: 0,
     eventSeq: 0,
+    promptInsightsEnabled: false,
+    promptInsightLineOffset: 0,
+    promptInsightSeq: 0,
   }
 
   const creds = await currentToken(AGENT)
@@ -115,11 +118,20 @@ export async function beginSession(opts: {
     }
   }
 
+  // Feature 0094. Written from the answer whenever there is one, independent
+  // of whether this session ends up inert for an unrelated reason (kill
+  // switch, repo not on the allowlist): `flueny status` reflects the org's
+  // actual policy for this developer, not "whether anything happened to send
+  // just now". Fail closed on absence, same as every other optional field.
+  const promptInsightsEnabled = answer.promptInsightsEnabled ?? false
+  writePromptInsightsEnabled(promptInsightsEnabled)
+
   const state: SessionState = {
     ...base,
     killSwitch: answer.killSwitch,
     dryRun: answer.dryRun,
     dryRunEndsAt: answer.dryRunEndsAt,
+    promptInsightsEnabled,
   }
 
   if (answer.killSwitch) {

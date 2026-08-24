@@ -32,6 +32,11 @@ client does not stub one.
    `eventId`.
 4. **OAuth device flow** against `POST /oauth/device` and `POST /oauth/token`.
 5. **`flueny dry-run --today`** and the end of day receipt (design decision 44).
+6. **Feature 0094, prompt insight scoring, off by default.** Only when the handshake says
+   `promptInsightsEnabled: true` for this developer (their own opt-in, or their org's policy),
+   `POST /integrations/coding/insights` carries that turn's real prompt and the agent's reply,
+   read at `Stop`, held as local values for one request, never queued to disk the way `CodingEvent`
+   is. `flueny status` says plainly whether this is on. `src/reads.ts` declares it.
 
 ## Install
 
