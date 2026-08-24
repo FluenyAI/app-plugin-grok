@@ -41,6 +41,11 @@ export const READS_LOCALLY: LocalRead[] = [
     site: 'src/transcript.ts',
     why: 'Claude Code does not fire a hook when you decline an edit, so declines exist nowhere else. Prompt text and assistant replies are never decoded.',
   },
+  {
+    what: "Feature 0094: your prompt and the agent's reply, only for a turn scored while prompt insight scoring is on for you",
+    site: 'src/prompt-insight.ts',
+    why: 'To grade the prompt for Description (does it state real constraints) and hand back a tip. Held as local values for one request, never written to disk, never logged. Off by default; your organisation can enforce it on or off, or leave it to you.',
+  },
 ]
 
 /** The wire form. Order is stable so a diff between two client versions is readable. */

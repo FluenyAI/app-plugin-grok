@@ -79,6 +79,28 @@ export interface SessionStartResponse {
   repoAllowlist: string[]
   bundle: PolicyBundle | null
   intervention: string | null
+  // Feature 0094. This developer's resolved prompt-insights policy, server
+  // authoritative. Optional so a client talking to an older backend still
+  // works: fail closed on absence, exactly like every other missing-field
+  // case in this client. Never read as anything but false unless present and
+  // literally true.
+  promptInsightsEnabled?: boolean
+}
+
+// Feature 0094. The only shape in this client allowed to carry prompt or
+// response text, and only once SessionState.promptInsightsEnabled is true.
+// Mirrors app-backend's InsightSubmissionDto exactly; not part of
+// CODING_EVENT_FIELDS or CodingEvent, a deliberately separate type so the
+// redaction guarantee on the event pipeline is unaffected by this one
+// existing at all.
+export interface InsightSubmission {
+  sessionId: string
+  turnId: string
+  repoId: string | null
+  pathClass: string | null
+  prompt: string
+  response: string
+  at: string
 }
 
 export interface DeviceCodeGrant {

@@ -4,6 +4,7 @@ import type {
   AgentId,
   CodingEventBatch,
   DeviceCodeGrant,
+  InsightSubmission,
   SessionStartRequest,
   SessionStartResponse,
   TokenResponse,
@@ -162,4 +163,20 @@ export function postEvents(
   batch: CodingEventBatch,
 ): Promise<HttpResult<unknown>> {
   return request(base, 'POST', '/integrations/coding/events', { token, body: batch })
+}
+
+// Feature 0094. Deliberately not queued through store.ts's queue.jsonl the
+// way postEvents is: that queue is a durable disk file, fine for metadata
+// that carries no free text, wrong for this. The caller sends this once,
+// best effort, and drops it on any failure rather than persisting prompt or
+// response text to disk to retry later. Same no-retry shape as the backend's
+// own coding-insights queue (attempts: 1): a lost scoring pass is a missing
+// data point, not a reason to hold real content anywhere longer than one
+// request needs it.
+export function postInsight(
+  base: string,
+  token: string,
+  submission: InsightSubmission,
+): Promise<HttpResult<unknown>> {
+  return request(base, 'POST', '/integrations/coding/insights', { token, body: submission })
 }

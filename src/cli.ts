@@ -24,6 +24,7 @@ import {
   readCounters,
   readCredentials,
   readLedger,
+  readPromptInsightsEnabled,
   readQueue,
   readReceiptDay,
   today,
@@ -269,6 +270,11 @@ async function status(): Promise<number> {
     `Observed today   ${counters.observed}`,
     `Sent today       ${counters.wouldSend}`,
     `Blocked today    ${counters.wouldBlock}`,
+    // Feature 0094. Last known from the most recent handshake, not fetched
+    // fresh: this command should not cost a network round trip to answer a
+    // question about local state, same reasoning as everything else on this
+    // page.
+    `Prompt scoring   ${readPromptInsightsEnabled() ? "on: your prompts and the agent's replies are sent for scoring" : 'off: neither ever leaves this machine'}`,
   ]
   say(lines.join('\n'))
 

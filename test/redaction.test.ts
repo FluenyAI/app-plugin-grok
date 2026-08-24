@@ -146,3 +146,109 @@ test('a hostile payload reaches the network as derived signal only', async () =>
     'the edit decision was not derived at all',
   )
 })
+
+// Feature 0094. Same shape as the test above, for the second channel that can
+// carry content off this machine, and the reason it needs its own test rather
+// than trusting the one above: promptInsightsEnabled being false is the
+// DEFAULT, not a special case, and a regression that made it default true
+// would send real prompt and reply text for every developer who never opted
+// in. handshakeBody() here does not set promptInsightsEnabled, so this is
+// exactly that default.
+test('with prompt insight scoring off, a transcript full of real prompt and reply text never reaches /insights', async () => {
+  writeBundle(BUNDLE)
+  writeCredentials({
+    apiUrl: 'http://api.test',
+    clientId: 'flueny-claude-code',
+    accessToken: 'token',
+    refreshToken: 'refresh',
+    expiresAt: Date.now() + 3_600_000,
+  })
+
+  const { writeFileSync } = await import('node:fs')
+  const transcriptPath = `${repoDir}/.git/off-transcript.jsonl`
+  writeFileSync(
+    transcriptPath,
+    [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'PROMPTTEXT-off-by-default' } }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'REPLYTEXT-off-by-default' }] },
+      }),
+    ].join('\n') + '\n',
+  )
+
+  const { calls, restore } = captureFetch((url) => {
+    if (url.endsWith('/session/start')) {
+      return { status: 200, body: handshakeBody({ repoAllowlist: [repoId] }) }
+    }
+    return { status: 202, body: {} }
+  })
+
+  try {
+    await onStop({ session_id: 'session-insights-off', cwd: repoDir, transcript_path: transcriptPath })
+  } finally {
+    restore()
+  }
+
+  const insightCalls = calls.filter((call) => call.url.endsWith('/insights'))
+  assert.equal(insightCalls.length, 0, 'a call to /insights was made while prompt insight scoring is off')
+  const everything = calls.map((call) => call.raw).join('\n')
+  assert.ok(!everything.includes('PROMPTTEXT-off-by-default'))
+  assert.ok(!everything.includes('REPLYTEXT-off-by-default'))
+})
+
+// The positive case: with the org's policy on for this developer, the
+// backend contract is respected exactly (a separate endpoint, the fields it
+// actually expects), and the same content never rides along on /events.
+test('with prompt insight scoring on, exactly the turn is sent to /insights and nowhere else', async () => {
+  writeBundle(BUNDLE)
+  writeCredentials({
+    apiUrl: 'http://api.test',
+    clientId: 'flueny-claude-code',
+    accessToken: 'token',
+    refreshToken: 'refresh',
+    expiresAt: Date.now() + 3_600_000,
+  })
+
+  const { writeFileSync } = await import('node:fs')
+  const transcriptPath = `${repoDir}/.git/on-transcript.jsonl`
+  writeFileSync(
+    transcriptPath,
+    [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'refactor the pricing module' } }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Refactored pricing.ts' }] },
+      }),
+    ].join('\n') + '\n',
+  )
+
+  const { calls, restore } = captureFetch((url) => {
+    if (url.endsWith('/session/start')) {
+      return { status: 200, body: handshakeBody({ repoAllowlist: [repoId], promptInsightsEnabled: true }) }
+    }
+    return { status: 202, body: {} }
+  })
+
+  try {
+    await onStop({ session_id: 'session-insights-on', cwd: repoDir, transcript_path: transcriptPath })
+  } finally {
+    restore()
+  }
+
+  const insightCalls = calls.filter((call) => call.url.endsWith('/insights'))
+  assert.equal(insightCalls.length, 1)
+  const body = insightCalls[0]!.body as Record<string, unknown>
+  assert.equal(body.sessionId, 'session-insights-on')
+  assert.equal(body.prompt, 'refactor the pricing module')
+  assert.equal(body.response, 'Refactored pricing.ts')
+  assert.equal(typeof body.turnId, 'string')
+  assert.deepEqual(Object.keys(body).sort(), ['at', 'pathClass', 'prompt', 'repoId', 'response', 'sessionId', 'turnId'])
+
+  // Never rides along on the metadata channel.
+  const ingest = calls.filter((call) => call.url.endsWith('/events'))
+  for (const call of ingest) {
+    assert.ok(!call.raw.includes('refactor the pricing module'))
+    assert.ok(!call.raw.includes('Refactored pricing.ts'))
+  }
+})
