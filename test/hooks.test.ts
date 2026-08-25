@@ -9,14 +9,15 @@ import { captureFetch, useTempConfig } from './helpers.ts'
 // after every assistant response, not on SessionEnd (/exit). hooks.ts had no
 // test of its own orchestration before this file: prompt-insight.ts, queue.ts
 // and api.ts were each tested in isolation, but nothing asserted which hook
-// actually calls sendPromptInsights, or that SessionEnd stays uninvolved. A
+// actually calls sendTurnSubmissions, or that SessionEnd stays uninvolved. A
 // regression that moved (or duplicated) insight submission onto SessionEnd
 // would have passed every existing test in this repo.
 
 useTempConfig()
 
 const { onPostToolUse, onStop, onSessionEnd } = await import('../src/hooks.ts')
-const { writeCredentials, writeSession } = await import('../src/store.ts')
+const { clearCredentials, readCounters, today, writeCredentials, writeSession } = await import('../src/store.ts')
+const { entriesFor } = await import('../src/receipt.ts')
 import type { SessionState } from '../src/store.ts'
 
 function connect(): void {
@@ -73,12 +74,28 @@ function assistantText(text: string): unknown {
   return { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } }
 }
 
+// today() is real wall-clock time and every test in this file shares one
+// counters file and one ledger file for it, so an exact assertion like
+// "insightsSent is 1" would break depending on test order. Diffing against a
+// snapshot taken before the call under test keeps each test's claim about
+// itself only, whatever ran before it the same day.
+function insightSnapshot(): { sent: number; failed: number; rows: number } {
+  const day = today()
+  const counters = readCounters(day)
+  return {
+    sent: counters.insightsSent,
+    failed: counters.insightsFailed,
+    rows: entriesFor(day).length,
+  }
+}
+
 test('a turn is scored on Stop, immediately, not deferred to SessionEnd or /exit', async () => {
   connect()
   const sessionId = 'stop-sends-insight'
   seedSession(sessionId, { promptInsightsEnabled: true })
   const transcript = writeTranscript([userText('fix the login bug'), assistantText('Fixed it in auth.ts')])
 
+  const before = insightSnapshot()
   const { calls, restore } = captureFetch(() => ({ status: 202, body: {} }))
   try {
     await onStop({ session_id: sessionId, cwd: '/tmp', transcript_path: transcript })
@@ -90,6 +107,59 @@ test('a turn is scored on Stop, immediately, not deferred to SessionEnd or /exit
   assert.equal(insightCalls.length, 1, 'Stop must send the turn itself, not queue it for exit to flush')
   assert.equal((insightCalls[0]?.body as { prompt: string }).prompt, 'fix the login bug')
   assert.equal((insightCalls[0]?.body as { response: string }).response, 'Fixed it in auth.ts')
+
+  // The local trace this whole file exists to protect: a delivered turn is
+  // now answerable from disk, not only inferable from "nothing threw".
+  const after = insightSnapshot()
+  assert.equal(after.sent - before.sent, 1)
+  assert.equal(after.failed - before.failed, 0)
+  assert.equal(after.rows - before.rows, 1, 'a delivered turn adds exactly one ledger row')
+})
+
+test('a submission the backend rejects counts as failed, visibly, not silently dropped', async () => {
+  connect()
+  const sessionId = 'stop-insight-rejected'
+  seedSession(sessionId, { promptInsightsEnabled: true })
+  const transcript = writeTranscript([userText('fix the login bug'), assistantText('Fixed it in auth.ts')])
+
+  const before = insightSnapshot()
+  const { restore } = captureFetch((url) =>
+    url.endsWith('/integrations/coding/insights') ? { status: 500, body: {} } : { status: 202, body: {} },
+  )
+  try {
+    await onStop({ session_id: sessionId, cwd: '/tmp', transcript_path: transcript })
+  } finally {
+    restore()
+  }
+
+  const after = insightSnapshot()
+  assert.equal(after.sent - before.sent, 0)
+  assert.equal(after.failed - before.failed, 1)
+  assert.equal(after.rows - before.rows, 0, 'a rejected submission must not claim a row that left the machine')
+})
+
+test('a submission attempted with no credential on this machine still counts as failed', async () => {
+  // Every test in this file shares one temp config dir, so an earlier test's
+  // connect() would otherwise leave a credential behind. Clearing it is what
+  // actually exercises currentToken(AGENT) resolving null, the branch
+  // sendTurnSubmissions takes before it ever reaches the network.
+  clearCredentials('claude-code')
+  const sessionId = 'stop-insight-no-credential'
+  seedSession(sessionId, { promptInsightsEnabled: true })
+  const transcript = writeTranscript([userText('fix the login bug'), assistantText('Fixed it in auth.ts')])
+
+  const before = insightSnapshot()
+  const { calls, restore } = captureFetch(() => ({ status: 202, body: {} }))
+  try {
+    await onStop({ session_id: sessionId, cwd: '/tmp', transcript_path: transcript })
+  } finally {
+    restore()
+  }
+
+  assert.equal(calls.some((c) => c.url.endsWith('/integrations/coding/insights')), false)
+  const after = insightSnapshot()
+  assert.equal(after.failed - before.failed, 1)
+  assert.equal(after.rows - before.rows, 0)
 })
 
 test('a developer who has not opted in sends nothing on Stop, even with a transcript', async () => {

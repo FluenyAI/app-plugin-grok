@@ -6,8 +6,8 @@ import { AGENT, beginSession, classifierFor, ensureSession } from './session.ts'
 import { clearSession, readSession, withSessionLock, writeSession } from './store.ts'
 import type { PendingEdit, SessionState } from './store.ts'
 import { enqueue, flush } from './queue.ts'
-import { currentToken, postInsight, postLiveFeedback, postRawActivity } from './api.ts'
-import { record } from './receipt.ts'
+import { currentToken, isOk, postInsight, postLiveFeedback, postRawActivity } from './api.ts'
+import { record, recordInsight } from './receipt.ts'
 import type { CodingEvent, InsightSubmission, LiveFeedbackSubmission, ToolActivityEntry } from './types.ts'
 
 // Feature 0098. The opportunistic flush from `onPostToolUse` (below) is what
@@ -264,6 +264,13 @@ export async function onStop(payload: RawPayload): Promise<HookOutcome> {
 // for the live-feedback submission -- never attached to the InsightSubmission
 // sent to /insights, whose DTO has no field for it and would 400 the whole
 // request under this backend's forbidNonWhitelisted validation.
+//
+// recordInsight() is the one durable trace of what happened to an /insights
+// submission, and it is deliberately not a retry mechanism: it records
+// delivered/failed as a count and, only on success, a field-name-only ledger
+// row. Without it a failing submission was invisible everywhere (`flueny
+// status`, `flueny dry-run --today`), so "is this actually working" had no
+// local answer. Live feedback is not counted here, it is a separate opt-in.
 async function sendTurnSubmissions(
   submissions: InsightSubmission[],
   toInsights: boolean,
@@ -272,14 +279,19 @@ async function sendTurnSubmissions(
 ): Promise<void> {
   if (submissions.length === 0 || (!toInsights && !toLiveFeedback)) return
   const creds = await currentToken(AGENT)
-  if (!creds) return
+  if (!creds) {
+    if (toInsights) for (const submission of submissions) recordInsight(submission, false)
+    return
+  }
   for (const submission of submissions) {
     if (toInsights) {
       try {
-        await postInsight(creds.apiUrl, creds.accessToken, submission)
+        const res = await postInsight(creds.apiUrl, creds.accessToken, submission)
+        recordInsight(submission, isOk(res.status))
       } catch {
         // Fire and forget. Nothing about a failed scoring pass is worth a
         // retry loop holding this developer's words in memory any longer.
+        recordInsight(submission, false)
       }
     }
     if (toLiveFeedback) {
