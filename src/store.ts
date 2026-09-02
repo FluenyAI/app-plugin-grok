@@ -87,6 +87,11 @@ export interface SessionState {
   // itself does not retry (see queue.ts's module comment for why events do,
   // and prompt-insight.ts's caller for why this deliberately does not).
   promptInsightSeq: number
+  // Feature 0098. Same fail-closed, resolved-once-per-handshake discipline as
+  // promptInsightsEnabled above, for the separate live-feedback opt-in. Both
+  // flags gate the SAME transcript sweep (prompt-insight.ts); this one just
+  // decides whether the extracted turn also goes to /live-feedback.
+  liveFeedbackEnabled: boolean
 }
 
 export interface PendingEdit {
@@ -232,6 +237,24 @@ export function readPromptInsightsEnabled(): boolean {
 
 export function writePromptInsightsEnabled(enabled: boolean): void {
   writePrivate(promptInsightsPath(), JSON.stringify({ enabled }))
+}
+
+// ---- live-feedback preference cache (feature 0098) ----
+//
+// Mirrors the prompt-insights cache above exactly, in its own file: the two
+// opt-ins are independent, and `flueny status` needs to answer both without a
+// network round trip.
+
+function liveFeedbackPath(): string {
+  return join(ensureDir(configDir()), 'live-feedback.json')
+}
+
+export function readLiveFeedbackEnabled(): boolean {
+  return readJson<{ enabled: boolean }>(liveFeedbackPath())?.enabled ?? false
+}
+
+export function writeLiveFeedbackEnabled(enabled: boolean): void {
+  writePrivate(liveFeedbackPath(), JSON.stringify({ enabled }))
 }
 
 // ---- per-session state ----

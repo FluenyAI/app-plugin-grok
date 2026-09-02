@@ -51,6 +51,7 @@ function seedSession(sessionId: string, over: Partial<SessionState> = {}): void 
     promptInsightsEnabled: false,
     promptInsightLineOffset: 0,
     promptInsightSeq: 0,
+    liveFeedbackEnabled: false,
     ...over,
   })
 }
@@ -122,4 +123,97 @@ test('SessionEnd never posts an insight itself: exiting is not part of this path
     false,
     'insight submission is Stop-only; SessionEnd must never be required for a scored turn to reach the backend',
   )
+})
+
+// Feature 0098. Mirrors the three tests above exactly, on the independent
+// liveFeedbackEnabled flag.
+test('a turn is sent to /live-feedback on Stop when live feedback is on', async () => {
+  connect()
+  const sessionId = 'stop-sends-live-feedback'
+  seedSession(sessionId, { liveFeedbackEnabled: true })
+  const transcript = writeTranscript([userText('fix the login bug'), assistantText('Fixed it in auth.ts')])
+
+  const { calls, restore } = captureFetch(() => ({ status: 202, body: {} }))
+  try {
+    await onStop({ session_id: sessionId, cwd: '/tmp', transcript_path: transcript })
+  } finally {
+    restore()
+  }
+
+  const liveFeedbackCalls = calls.filter((c) => c.url.endsWith('/integrations/coding/live-feedback'))
+  assert.equal(liveFeedbackCalls.length, 1)
+  assert.equal((liveFeedbackCalls[0]?.body as { prompt: string }).prompt, 'fix the login bug')
+  assert.equal((liveFeedbackCalls[0]?.body as { response: string }).response, 'Fixed it in auth.ts')
+  // Never rides along on the other opt-in's endpoint.
+  assert.equal(calls.some((c) => c.url.endsWith('/integrations/coding/insights')), false)
+})
+
+test('a developer who has not opted into live feedback sends nothing to /live-feedback', async () => {
+  connect()
+  const sessionId = 'stop-live-feedback-off'
+  seedSession(sessionId, { liveFeedbackEnabled: false })
+  const transcript = writeTranscript([userText('fix the login bug'), assistantText('Fixed it in auth.ts')])
+
+  const { calls, restore } = captureFetch(() => ({ status: 202, body: {} }))
+  try {
+    await onStop({ session_id: sessionId, cwd: '/tmp', transcript_path: transcript })
+  } finally {
+    restore()
+  }
+
+  assert.equal(calls.some((c) => c.url.endsWith('/integrations/coding/live-feedback')), false)
+})
+
+test('SessionEnd never posts live feedback either: exiting is not part of this path', async () => {
+  connect()
+  const sessionId = 'session-end-no-live-feedback'
+  seedSession(sessionId, { liveFeedbackEnabled: true })
+
+  const { calls, restore } = captureFetch(() => ({ status: 202, body: {} }))
+  try {
+    await onSessionEnd({ session_id: sessionId, cwd: '/tmp' })
+  } finally {
+    restore()
+  }
+
+  assert.equal(calls.some((c) => c.url.endsWith('/integrations/coding/live-feedback')), false)
+})
+
+// The independence itself: each opt-in controls only its own endpoint, and
+// the sweep is shared rather than run twice.
+test('a turn with both opt-ins on reaches both endpoints, from one sweep', async () => {
+  connect()
+  const sessionId = 'stop-both-opt-ins'
+  seedSession(sessionId, { promptInsightsEnabled: true, liveFeedbackEnabled: true })
+  const transcript = writeTranscript([userText('fix the login bug'), assistantText('Fixed it in auth.ts')])
+
+  const { calls, restore } = captureFetch(() => ({ status: 202, body: {} }))
+  try {
+    await onStop({ session_id: sessionId, cwd: '/tmp', transcript_path: transcript })
+  } finally {
+    restore()
+  }
+
+  const insightCalls = calls.filter((c) => c.url.endsWith('/integrations/coding/insights'))
+  const liveFeedbackCalls = calls.filter((c) => c.url.endsWith('/integrations/coding/live-feedback'))
+  assert.equal(insightCalls.length, 1)
+  assert.equal(liveFeedbackCalls.length, 1)
+  assert.equal((insightCalls[0]?.body as { turnId: string }).turnId, (liveFeedbackCalls[0]?.body as { turnId: string }).turnId)
+})
+
+test('a turn with neither opt-in on sweeps nothing and calls neither endpoint', async () => {
+  connect()
+  const sessionId = 'stop-neither-opt-in'
+  seedSession(sessionId, { promptInsightsEnabled: false, liveFeedbackEnabled: false })
+  const transcript = writeTranscript([userText('fix the login bug'), assistantText('Fixed it in auth.ts')])
+
+  const { calls, restore } = captureFetch(() => ({ status: 202, body: {} }))
+  try {
+    await onStop({ session_id: sessionId, cwd: '/tmp', transcript_path: transcript })
+  } finally {
+    restore()
+  }
+
+  assert.equal(calls.some((c) => c.url.endsWith('/integrations/coding/insights')), false)
+  assert.equal(calls.some((c) => c.url.endsWith('/integrations/coding/live-feedback')), false)
 })

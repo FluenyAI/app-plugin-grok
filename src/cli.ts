@@ -24,6 +24,7 @@ import {
   readCounters,
   readCredentials,
   readLedger,
+  readLiveFeedbackEnabled,
   readPromptInsightsEnabled,
   readQueue,
   readReceiptDay,
@@ -275,6 +276,8 @@ async function status(): Promise<number> {
     // question about local state, same reasoning as everything else on this
     // page.
     `Prompt scoring   ${readPromptInsightsEnabled() ? "on: your prompts and the agent's replies are sent for scoring" : 'off: neither ever leaves this machine'}`,
+    // Feature 0098. Same reasoning as Prompt scoring above: cached, not fetched.
+    `Live feedback    ${readLiveFeedbackEnabled() ? "on: your prompts and the agent's replies are sent for a real-time coaching nudge" : 'off: neither ever leaves this machine'}`,
   ]
   say(lines.join('\n'))
 

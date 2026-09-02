@@ -85,6 +85,10 @@ export interface SessionStartResponse {
   // case in this client. Never read as anything but false unless present and
   // literally true.
   promptInsightsEnabled?: boolean
+  // Feature 0098. Same fail-closed rule as promptInsightsEnabled above, for
+  // the separate live-feedback opt-in (see feature 0098's Decisions for why
+  // these are two flags, not one).
+  liveFeedbackEnabled?: boolean
 }
 
 // Feature 0094. The only shape in this client allowed to carry prompt or
@@ -94,6 +98,23 @@ export interface SessionStartResponse {
 // redaction guarantee on the event pipeline is unaffected by this one
 // existing at all.
 export interface InsightSubmission {
+  sessionId: string
+  turnId: string
+  repoId: string | null
+  pathClass: string | null
+  prompt: string
+  response: string
+  at: string
+}
+
+// Feature 0098. The only other shape in this client allowed to carry prompt or
+// response text, alongside InsightSubmission above, and only once
+// SessionState.liveFeedbackEnabled is true. Mirrors app-backend's
+// LiveFeedbackSubmissionDto exactly. Same shape as InsightSubmission today,
+// kept as a separate type anyway: the two opt-ins are independent, and a
+// future divergence in what either submission carries must not require
+// threading a new field through both call sites by accident.
+export interface LiveFeedbackSubmission {
   sessionId: string
   turnId: string
   repoId: string | null
