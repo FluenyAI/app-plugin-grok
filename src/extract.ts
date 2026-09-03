@@ -1,6 +1,7 @@
 import { relative, isAbsolute } from 'node:path'
 import { classifyPath } from './classify.ts'
 import { looksDeclined } from './decline.ts'
+import type { CodingCommandCategory, CodingToolCategory } from './types.ts'
 
 // Local extraction. This is the point of the whole product.
 //
@@ -29,6 +30,16 @@ export interface ToolFacts {
   // fire in that case, so this catches the shapes where it does and the
   // transcript sweep at Stop catches the rest.
   declined: boolean
+  // Feature 0108. A coarse bucket for which tool ran, so a developer glancing at
+  // the live feed sees "Edit" or "Bash" instead of an undifferentiated "Tool
+  // use". Six fixed values only, same reasoning as pathClass: a reviewable set,
+  // never the raw tool name.
+  toolCategory: CodingToolCategory
+  // Feature 0108. Only meaningful when toolCategory is 'bash'; null otherwise.
+  // Reuses the same conservative TEST_COMMAND detection isTestCommand already
+  // does, so this is a rename of an existing signal for that one category, not
+  // a new detector.
+  commandCategory: CodingCommandCategory | null
 }
 
 const EDIT_TOOLS = new Set([
@@ -41,6 +52,23 @@ const EDIT_TOOLS = new Set([
   'search_replace', // Grok's name for Edit / Write / MultiEdit
 ])
 const SUBAGENT_TOOLS = new Set(['task', 'spawn_subagent'])
+const READ_TOOLS = new Set(['read', 'read_file', 'cat', 'view'])
+const BASH_TOOLS = new Set(['bash', 'shell', 'terminal', 'run_terminal_cmd', 'run_terminal_command'])
+const SEARCH_TOOLS = new Set(['grep', 'glob', 'search', 'find', 'search_files', 'codebase_search', 'ls'])
+const WEB_TOOLS = new Set(['webfetch', 'web_fetch', 'websearch', 'web_search', 'browse'])
+
+// isEdit is checked first: EDIT_TOOLS and BASH_TOOLS/SEARCH_TOOLS/etc are
+// disjoint by construction, but a tool that somehow matched two sets should
+// still resolve to the more specific, already-computed classification rather
+// than whichever set this function happens to check first.
+function classifyTool(lower: string, isEdit: boolean): CodingToolCategory {
+  if (isEdit) return 'edit'
+  if (BASH_TOOLS.has(lower)) return 'bash'
+  if (READ_TOOLS.has(lower)) return 'read'
+  if (SEARCH_TOOLS.has(lower)) return 'search'
+  if (WEB_TOOLS.has(lower)) return 'web'
+  return 'other'
+}
 
 // Deliberately conservative. A false positive here marks an accept as checked
 // when it was not, which inflates Diligence, and an inflated score is worse than
@@ -84,14 +112,19 @@ export function extractToolFacts(
   const pathClass = rawPath ? classifyPath(opts.classifier, toRepoRelative(rawPath, opts.repoRoot)) : null
 
   const command = firstString(input, ['command'])
+  const isEdit = EDIT_TOOLS.has(lower)
+  const isTestCommand = command !== null && TEST_COMMAND.test(command)
+  const toolCategory = classifyTool(lower, isEdit)
 
   return {
     toolUseId: firstString(payload, ['tool_use_id', 'toolUseId']),
     kind: SUBAGENT_TOOLS.has(lower) ? 'subagent' : 'tool-use',
-    isEdit: EDIT_TOOLS.has(lower),
-    isTestCommand: command !== null && TEST_COMMAND.test(command),
+    isEdit,
+    isTestCommand,
     pathClass,
     declined: looksDeclined(payload.tool_response ?? payload.toolResult),
+    toolCategory,
+    commandCategory: toolCategory === 'bash' ? (isTestCommand ? 'test' : 'other') : null,
   }
 }
 

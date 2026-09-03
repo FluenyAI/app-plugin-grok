@@ -26,6 +26,8 @@ export function toWireEvent(event: CodingEvent): CodingEvent {
       case 'repoId':
       case 'pathClass':
       case 'decision':
+      case 'toolCategory':
+      case 'commandCategory':
         if (value === null || typeof value === 'string') out[field] = value
         break
       case 'testsRun':

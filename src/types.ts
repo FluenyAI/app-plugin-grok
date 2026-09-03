@@ -12,6 +12,19 @@ export type CodingEventKind = 'tool-use' | 'edit-decision' | 'session-end' | 'su
 
 export type EditDecision = 'accepted' | 'rejected' | 'reverted'
 
+// Feature 0108. A coarse tool category, not the raw tool name: bounded to six
+// buckets so the set of possible values is fixed and reviewable, the same
+// reasoning pathClass already applies to file paths. Only present on
+// `kind: 'tool-use'` events; 'other' covers anything unrecognized (an MCP
+// tool, a future Claude Code tool, an unmapped Grok tool name) rather than
+// letting an unbounded raw string onto the wire.
+export type CodingToolCategory = 'read' | 'edit' | 'bash' | 'search' | 'web' | 'other'
+
+// Feature 0108. Only meaningful when toolCategory === 'bash': whether the
+// command matched the same conservative test-command detection that already
+// backs `testsRun` on edit-decision events.
+export type CodingCommandCategory = 'test' | 'other'
+
 export interface CodingEvent {
   eventId: string
   kind: CodingEventKind
@@ -22,6 +35,8 @@ export interface CodingEvent {
   testsRun?: boolean
   subagentCount?: number
   durationMs?: number
+  toolCategory?: CodingToolCategory
+  commandCategory?: CodingCommandCategory
 }
 
 export interface CodingEventBatch {
@@ -42,6 +57,8 @@ export const CODING_EVENT_FIELDS = [
   'testsRun',
   'subagentCount',
   'durationMs',
+  'toolCategory',
+  'commandCategory',
 ] as const
 
 export interface AgentCapabilities {
