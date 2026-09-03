@@ -359,3 +359,82 @@ test('with live feedback on, exactly the turn is sent to /live-feedback and nowh
   }
   assert.equal(calls.some((call) => call.url.endsWith('/insights')), false)
 })
+
+// Feature 0109. The one deliberate exception to this whole file: with the
+// developer's own explicit rawActivityEnabled opt-in on, a real repo-relative
+// file path and real Bash command text ARE allowed to cross, but ONLY those
+// two things, ONLY on /raw-activity, and every other POISON marker (a diff, a
+// tool response, an env var, an absolute path outside the repo) must still
+// never appear anywhere, on any endpoint, even with this opt-in on. That is
+// the actual boundary this feature draws, and it is the one thing this test
+// exists to prove.
+test('with raw activity on, exactly the real path and command cross on /raw-activity, and nothing else ever does', async () => {
+  writeBundle(BUNDLE)
+  writeCredentials({
+    apiUrl: 'http://api.test',
+    clientId: 'flueny-claude-code',
+    accessToken: 'token',
+    refreshToken: 'refresh',
+    expiresAt: Date.now() + 3_600_000,
+  })
+
+  const { calls, restore } = captureFetch((url) => {
+    if (url.endsWith('/session/start')) {
+      return { status: 200, body: handshakeBody({ repoAllowlist: [repoId], rawActivityEnabled: true }) }
+    }
+    return { status: 202, body: {} }
+  })
+
+  const REAL_COMMAND = 'RAWCOMMAND-git-status-check'
+  // A distinct session id: reusing 'session-redaction' would make
+  // ensureSession() return the state an earlier test in this file already
+  // wrote for that id, silently ignoring this test's rawActivityEnabled: true
+  // handshake override.
+  const sessionId = 'session-raw-activity'
+
+  try {
+    // An Edit call: proves rawPath crosses, and that old_string/new_string/
+    // tool_response/env -- none of which this tool call needs to expose a
+    // path -- still never do.
+    await onPostToolUse({ ...hostilePayload(), session_id: sessionId })
+    // A Bash call: proves rawCommand crosses, for a tool category where
+    // command text is actually meaningful, and only that category.
+    await onPostToolUse({
+      session_id: sessionId,
+      cwd: repoDir,
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: REAL_COMMAND },
+      tool_response: { stdout: 'TOOLRESPONSE-diff-plus-minus' },
+    })
+    await onStop({ session_id: sessionId, cwd: repoDir })
+  } finally {
+    restore()
+  }
+
+  const rawActivityCalls = calls.filter((call) => call.url.endsWith('/raw-activity'))
+  assert.equal(rawActivityCalls.length, 2, 'expected one /raw-activity call per tool call carrying raw data')
+
+  const pathCall = rawActivityCalls.find((call) => (call.body as Record<string, unknown>).rawPath)
+  assert.equal((pathCall?.body as Record<string, unknown> | undefined)?.rawPath, 'src/auth/session.ts')
+  assert.equal((pathCall?.body as Record<string, unknown>).rawCommand, undefined)
+
+  const commandCall = rawActivityCalls.find((call) => (call.body as Record<string, unknown>).rawCommand)
+  assert.equal((commandCall?.body as Record<string, unknown> | undefined)?.rawCommand, REAL_COMMAND)
+  assert.equal((commandCall?.body as Record<string, unknown>).rawPath, undefined)
+
+  for (const call of rawActivityCalls) {
+    const body = call.body as Record<string, unknown>
+    assert.deepEqual(
+      Object.keys(body).sort(),
+      Object.keys(body).includes('rawPath') ? ['at', 'eventId', 'rawPath', 'sessionId'] : ['at', 'eventId', 'rawCommand', 'sessionId'],
+    )
+  }
+
+  // The actual boundary: everything else on POISON must still never appear,
+  // on ANY call, including the two /raw-activity calls above.
+  const everything = calls.map((call) => call.raw).join('\n')
+  for (const poison of POISON) {
+    assert.ok(!everything.includes(poison), `raw activity leaked ${poison}`)
+  }
+})

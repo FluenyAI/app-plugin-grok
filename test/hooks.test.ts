@@ -15,7 +15,7 @@ import { captureFetch, useTempConfig } from './helpers.ts'
 
 useTempConfig()
 
-const { onStop, onSessionEnd } = await import('../src/hooks.ts')
+const { onPostToolUse, onStop, onSessionEnd } = await import('../src/hooks.ts')
 const { writeCredentials, writeSession } = await import('../src/store.ts')
 import type { SessionState } from '../src/store.ts'
 
@@ -52,6 +52,8 @@ function seedSession(sessionId: string, over: Partial<SessionState> = {}): void 
     promptInsightLineOffset: 0,
     promptInsightSeq: 0,
     liveFeedbackEnabled: false,
+    rawActivityEnabled: false,
+    turnToolActivity: [],
     ...over,
   })
 }
@@ -216,4 +218,76 @@ test('a turn with neither opt-in on sweeps nothing and calls neither endpoint', 
 
   assert.equal(calls.some((c) => c.url.endsWith('/integrations/coding/insights')), false)
   assert.equal(calls.some((c) => c.url.endsWith('/integrations/coding/live-feedback')), false)
+})
+
+// Feature 0109. turnToolActivity accumulates one entry per PostToolUse and is
+// attached only to the live-feedback submission (never to InsightSubmission,
+// which has no field for it), then reset so a later Stop with no new tool
+// calls does not resend the same activity.
+test('turnToolActivity accumulates across tool calls and is attached to the live-feedback submission, then reset', async () => {
+  connect()
+  const sessionId = 'stop-attaches-tool-activity'
+  seedSession(sessionId, { liveFeedbackEnabled: true })
+
+  const { restore: restoreTools } = captureFetch(() => ({ status: 202, body: {} }))
+  try {
+    await onPostToolUse({ session_id: sessionId, cwd: '/tmp', tool_name: 'Read', tool_input: { file_path: '/tmp/README.md' } })
+    await onPostToolUse({ session_id: sessionId, cwd: '/tmp', tool_name: 'Bash', tool_input: { command: 'npm test' } })
+  } finally {
+    restoreTools()
+  }
+
+  const transcript = writeTranscript([userText('review recent changes'), assistantText('Looked at README and ran tests')])
+  const { calls, restore } = captureFetch(() => ({ status: 202, body: {} }))
+  try {
+    await onStop({ session_id: sessionId, cwd: '/tmp', transcript_path: transcript })
+  } finally {
+    restore()
+  }
+
+  const liveFeedbackCalls = calls.filter((c) => c.url.endsWith('/integrations/coding/live-feedback'))
+  assert.equal(liveFeedbackCalls.length, 1)
+  const toolActivity = (liveFeedbackCalls[0]?.body as { toolActivity?: { toolCategory: string }[] }).toolActivity
+  assert.equal(Array.isArray(toolActivity), true)
+  assert.deepEqual(
+    toolActivity?.map((e) => e.toolCategory),
+    ['read', 'bash'],
+  )
+
+  // A second Stop with no tool calls in between must not resend it.
+  const transcript2 = writeTranscript([userText('one more thing'), assistantText('Done')])
+  const { calls: calls2, restore: restore2 } = captureFetch(() => ({ status: 202, body: {} }))
+  try {
+    await onStop({ session_id: sessionId, cwd: '/tmp', transcript_path: transcript2 })
+  } finally {
+    restore2()
+  }
+  const secondCall = calls2.find((c) => c.url.endsWith('/integrations/coding/live-feedback'))
+  assert.equal((secondCall?.body as { toolActivity?: unknown[] } | undefined)?.toolActivity, undefined)
+})
+
+test('InsightSubmission never carries toolActivity, even when both opt-ins are on', async () => {
+  connect()
+  const sessionId = 'stop-insight-no-tool-activity'
+  seedSession(sessionId, { promptInsightsEnabled: true, liveFeedbackEnabled: true })
+
+  const { restore: restoreTools } = captureFetch(() => ({ status: 202, body: {} }))
+  try {
+    await onPostToolUse({ session_id: sessionId, cwd: '/tmp', tool_name: 'Bash', tool_input: { command: 'npm test' } })
+  } finally {
+    restoreTools()
+  }
+
+  const transcript = writeTranscript([userText('ran the tests'), assistantText('All green')])
+  const { calls, restore } = captureFetch(() => ({ status: 202, body: {} }))
+  try {
+    await onStop({ session_id: sessionId, cwd: '/tmp', transcript_path: transcript })
+  } finally {
+    restore()
+  }
+
+  const insightCall = calls.find((c) => c.url.endsWith('/integrations/coding/insights'))
+  assert.equal(insightCall && 'toolActivity' in (insightCall.body as Record<string, unknown>), false)
+  const liveFeedbackCall = calls.find((c) => c.url.endsWith('/integrations/coding/live-feedback'))
+  assert.equal(Array.isArray((liveFeedbackCall?.body as { toolActivity?: unknown[] } | undefined)?.toolActivity), true)
 })

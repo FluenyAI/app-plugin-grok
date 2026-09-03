@@ -10,7 +10,7 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { AgentId, CodingEvent, PolicyBundle } from './types.ts'
+import type { AgentId, CodingEvent, PolicyBundle, ToolActivityEntry } from './types.ts'
 
 // Everything this client persists, in one place, so "what is on disk" is a
 // question with one answer.
@@ -92,6 +92,17 @@ export interface SessionState {
   // flags gate the SAME transcript sweep (prompt-insight.ts); this one just
   // decides whether the extracted turn also goes to /live-feedback.
   liveFeedbackEnabled: boolean
+  // Feature 0109. Same fail-closed, resolved-once-per-handshake discipline
+  // again, for the raw-activity opt-in: whether extractToolFacts() may return
+  // a real file path / Bash command at all this session. Read fresh at
+  // onPostToolUse time (via includeRaw), not cached inside ToolFacts itself.
+  rawActivityEnabled: boolean
+  // Feature 0109. This Stop-cycle's tool-call activity (toolCategory/pathClass
+  // always, rawPath/rawCommand when rawActivityEnabled was on for that call),
+  // bounded at MAX_TURN_TOOL_ACTIVITY entries (hooks.ts) and attached to each
+  // LiveFeedbackSubmission built at the next Stop, then reset to empty --
+  // mirrors pendingEdits/testsRanThisTurn's exact per-turn lifecycle.
+  turnToolActivity: ToolActivityEntry[]
 }
 
 export interface PendingEdit {
@@ -255,6 +266,24 @@ export function readLiveFeedbackEnabled(): boolean {
 
 export function writeLiveFeedbackEnabled(enabled: boolean): void {
   writePrivate(liveFeedbackPath(), JSON.stringify({ enabled }))
+}
+
+// ---- raw-activity preference cache (feature 0109) ----
+//
+// Mirrors the prompt-insights and live-feedback caches above exactly, in its
+// own file: all three opt-ins are independent, and `flueny status` needs to
+// answer all three without a network round trip.
+
+function rawActivityPath(): string {
+  return join(ensureDir(configDir()), 'raw-activity.json')
+}
+
+export function readRawActivityEnabled(): boolean {
+  return readJson<{ enabled: boolean }>(rawActivityPath())?.enabled ?? false
+}
+
+export function writeRawActivityEnabled(enabled: boolean): void {
+  writePrivate(rawActivityPath(), JSON.stringify({ enabled }))
 }
 
 // ---- per-session state ----
