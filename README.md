@@ -6,10 +6,14 @@ TypeScript on Node, and the shipped client will not be.
 
 > **The Rust rewrite is still required before any customer install.** Hooks of type `command`
 > spawn a process per invocation (eng findings 13 and 15). Measured on this machine, a
-> `PostToolUse` hook through this client costs **~60ms**, which is Node interpreter startup and
-> almost nothing else; a native binary is ~1 to 5ms. At the tool-call rate of a working session
-> that is the difference between invisible and noticeable, and it is paid on the developer's
-> critical path every time. This spike is the protocol proof. It is not the product.
+> `PostToolUse` hook through this client costs **~60ms** of Node interpreter startup, plus
+> (feature 0098) one opportunistic network flush capped at 400ms so the live feed updates within
+> the same hook call -- a native binary is ~1 to 5ms of the former, and a slow or unreachable
+> backend costs at most the 400ms cap on the latter, never more, because a failed live flush
+> leaves the event queued for the next Stop/SessionEnd rather than retrying inline. At the
+> tool-call rate of a working session that is the difference between invisible and noticeable,
+> and it is paid on the developer's critical path every time. This spike is the protocol proof.
+> It is not the product.
 
 The other spike compromise: the hook token lives in a **mode 0600 file** under the config
 directory, not the OS keychain. A 0600 file is readable by any process running as the developer,
@@ -29,7 +33,9 @@ client does not stub one.
    leaves is a `CodingEvent`: nine fields, none of which can hold prompt text, code, file
    contents, `tool_input` or `tool_response`.
 3. **A bounded local queue** and `POST /integrations/coding/events`, batched at 500, deduped on
-   `eventId`.
+   `eventId`. **Feature 0098:** `PostToolUse` now flushes opportunistically (400ms budget) right
+   after enqueuing, not only at `Stop`/`SessionEnd`/the next `SessionStart`, so a tool call shows
+   up on `/companion/live` within seconds instead of only at session end.
 4. **OAuth device flow** against `POST /oauth/device` and `POST /oauth/token`.
 5. **`flueny dry-run --today`** and the end of day receipt (design decision 44).
 6. **Feature 0094, prompt insight scoring, off by default.** Only when the handshake says
@@ -37,6 +43,12 @@ client does not stub one.
    `POST /integrations/coding/insights` carries that turn's real prompt and the agent's reply,
    read at `Stop`, held as local values for one request, never queued to disk the way `CodingEvent`
    is. `flueny status` says plainly whether this is on. `src/reads.ts` declares it.
+7. **Feature 0098, live feedback, off by default, independent of prompt insight scoring.** Same
+   read, same shape, a different endpoint and its own opt-in: when the handshake says
+   `liveFeedbackEnabled: true`, the same `Stop`-time turn is also (or instead) sent to
+   `POST /integrations/coding/live-feedback`, and the resulting coaching nudge appears on
+   `/companion/live` rather than a retrospective radar-chart axis. `flueny status` reports this
+   opt-in on its own line.
 
 ## Install
 

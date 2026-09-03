@@ -42,9 +42,13 @@ export const READS_LOCALLY: LocalRead[] = [
     why: 'Claude Code does not fire a hook when you decline an edit, so declines exist nowhere else. Prompt text and assistant replies are never decoded.',
   },
   {
-    what: "Feature 0094: your prompt and the agent's reply, only for a turn scored while prompt insight scoring is on for you",
+    // Feature 0098 widened this declaration's `what`/`why`, not its `site`:
+    // live feedback reuses this exact same read (see hooks.ts's onStop),
+    // rather than adding a second one, so this text has to be true for
+    // either reason the read runs, not just the one it was written for.
+    what: "Your prompt and the agent's reply, only for a turn scored while prompt insight scoring or live feedback is on for you",
     site: 'src/prompt-insight.ts',
-    why: 'To grade the prompt for Description (does it state real constraints) and hand back a tip. Held as local values for one request, never written to disk, never logged. Off by default; your organisation can enforce it on or off, or leave it to you.',
+    why: "Prompt insight scoring (feature 0094) grades the prompt for Description and hands back a tip; live feedback (feature 0098) hands back a real-time coaching nudge instead. Held as local values for one request, never written to disk, never logged. Off by default for both; your organisation can enforce either on or off, or leave it to you.",
   },
 ]
 

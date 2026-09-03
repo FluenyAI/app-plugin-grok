@@ -113,6 +113,68 @@ test('an allowlisted repository is live', async () => {
   }
 })
 
+// Feature 0098. A tool call now reaches /events within the same hook
+// invocation, not only at the next Stop/SessionEnd -- that cadence change is
+// the entire mechanism behind the live feed. Session boundaries elsewhere in
+// this file (SessionStart/Stop/SessionEnd flushing anything left over) still
+// exist as a safety net; this test is the one asserting the live path itself.
+test('a tool call is flushed to /events within the same PostToolUse call, not deferred to Stop', async () => {
+  connect()
+  forgetBundle()
+  const { calls, restore } = captureFetch(() => ({ status: 200, body: handshakeBody({ repoAllowlist: [repoId] }) }))
+  try {
+    await beginSession({ sessionId: 'live-flush', cwd: repoDir })
+    const outcome = await onPostToolUse({
+      session_id: 'live-flush',
+      cwd: repoDir,
+      tool_name: 'Read',
+      tool_input: { file_path: `${repoDir}/src/app.ts` },
+    })
+    assert.equal(outcome.sent, 1)
+    assert.equal(
+      calls.filter((call) => call.url.endsWith('/events')).length,
+      1,
+      'PostToolUse must flush live, without waiting for a Stop hook that never runs in this test',
+    )
+  } finally {
+    restore()
+  }
+})
+
+// The bounded-timeout half of the same change: a backend that never answers
+// must not turn every tool call into a multi-second stall. A failed live
+// flush leaves the event queued, so the tool call still completes.
+test('a live flush that cannot reach the backend does not lose the event', async () => {
+  connect()
+  forgetBundle()
+  const setup = captureFetch(() => ({ status: 200, body: handshakeBody({ repoAllowlist: [repoId] }) }))
+  try {
+    await beginSession({ sessionId: 'live-flush-fails', cwd: repoDir })
+  } finally {
+    setup.restore()
+  }
+
+  const original = globalThis.fetch
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    if (String(input).endsWith('/events')) throw new Error('network unreachable')
+    return original(input)
+  }) as typeof globalThis.fetch
+  try {
+    const outcome = await onPostToolUse({
+      session_id: 'live-flush-fails',
+      cwd: repoDir,
+      tool_name: 'Read',
+      tool_input: { file_path: `${repoDir}/src/app.ts` },
+    })
+    // Queued, and the failed live flush did not throw out of the hook.
+    assert.equal(outcome.sent, 1)
+    const { readQueue } = await import('../src/store.ts')
+    assert.equal(readQueue().length, 1, 'the event must stay queued for the next flush after a failed live send')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
 test('the bundle ETag path: sent, then cached, then refetched when the cache is gone', async () => {
   connect()
   forgetBundle()

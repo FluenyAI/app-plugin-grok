@@ -252,3 +252,110 @@ test('with prompt insight scoring on, exactly the turn is sent to /insights and 
     assert.ok(!call.raw.includes('Refactored pricing.ts'))
   }
 })
+
+// Feature 0098. Same shape as the two prompt-insight tests above, for the
+// second opt-in that can carry content off this machine: liveFeedbackEnabled
+// being false is the default, and a regression that made it default true
+// would send real prompt and reply text for every developer who never
+// opted in. handshakeBody() here does not set liveFeedbackEnabled, so this
+// is exactly that default.
+test('with live feedback off, a transcript full of real prompt and reply text never reaches /live-feedback', async () => {
+  writeBundle(BUNDLE)
+  writeCredentials({
+    apiUrl: 'http://api.test',
+    clientId: 'flueny-claude-code',
+    accessToken: 'token',
+    refreshToken: 'refresh',
+    expiresAt: Date.now() + 3_600_000,
+  })
+
+  const { writeFileSync } = await import('node:fs')
+  const transcriptPath = `${repoDir}/.git/live-feedback-off-transcript.jsonl`
+  writeFileSync(
+    transcriptPath,
+    [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'PROMPTTEXT-live-feedback-off-by-default' } }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'REPLYTEXT-live-feedback-off-by-default' }] },
+      }),
+    ].join('\n') + '\n',
+  )
+
+  const { calls, restore } = captureFetch((url) => {
+    if (url.endsWith('/session/start')) {
+      return { status: 200, body: handshakeBody({ repoAllowlist: [repoId] }) }
+    }
+    return { status: 202, body: {} }
+  })
+
+  try {
+    await onStop({ session_id: 'session-live-feedback-off', cwd: repoDir, transcript_path: transcriptPath })
+  } finally {
+    restore()
+  }
+
+  const liveFeedbackCalls = calls.filter((call) => call.url.endsWith('/live-feedback'))
+  assert.equal(liveFeedbackCalls.length, 0, 'a call to /live-feedback was made while live feedback is off')
+  const everything = calls.map((call) => call.raw).join('\n')
+  assert.ok(!everything.includes('PROMPTTEXT-live-feedback-off-by-default'))
+  assert.ok(!everything.includes('REPLYTEXT-live-feedback-off-by-default'))
+})
+
+// The positive case, mirroring the /insights test above: with the org's
+// policy on for this developer, the backend contract is respected exactly
+// (a separate endpoint, the fields it actually expects), and the same
+// content never rides along on /events or /insights.
+test('with live feedback on, exactly the turn is sent to /live-feedback and nowhere else', async () => {
+  writeBundle(BUNDLE)
+  writeCredentials({
+    apiUrl: 'http://api.test',
+    clientId: 'flueny-claude-code',
+    accessToken: 'token',
+    refreshToken: 'refresh',
+    expiresAt: Date.now() + 3_600_000,
+  })
+
+  const { writeFileSync } = await import('node:fs')
+  const transcriptPath = `${repoDir}/.git/live-feedback-on-transcript.jsonl`
+  writeFileSync(
+    transcriptPath,
+    [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'add a health check endpoint' } }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Added GET /health' }] },
+      }),
+    ].join('\n') + '\n',
+  )
+
+  const { calls, restore } = captureFetch((url) => {
+    if (url.endsWith('/session/start')) {
+      return { status: 200, body: handshakeBody({ repoAllowlist: [repoId], liveFeedbackEnabled: true }) }
+    }
+    return { status: 202, body: {} }
+  })
+
+  try {
+    await onStop({ session_id: 'session-live-feedback-on', cwd: repoDir, transcript_path: transcriptPath })
+  } finally {
+    restore()
+  }
+
+  const liveFeedbackCalls = calls.filter((call) => call.url.endsWith('/live-feedback'))
+  assert.equal(liveFeedbackCalls.length, 1)
+  const body = liveFeedbackCalls[0]!.body as Record<string, unknown>
+  assert.equal(body.sessionId, 'session-live-feedback-on')
+  assert.equal(body.prompt, 'add a health check endpoint')
+  assert.equal(body.response, 'Added GET /health')
+  assert.equal(typeof body.turnId, 'string')
+  assert.deepEqual(Object.keys(body).sort(), ['at', 'pathClass', 'prompt', 'repoId', 'response', 'sessionId', 'turnId'])
+
+  // Never rides along on the metadata channel or the other opt-in's endpoint.
+  for (const call of calls) {
+    if (call.url.endsWith('/live-feedback')) continue
+    assert.ok(!call.raw.includes('add a health check endpoint'))
+    assert.ok(!call.raw.includes('Added GET /health'))
+  }
+  assert.equal(calls.some((call) => call.url.endsWith('/insights')), false)
+})

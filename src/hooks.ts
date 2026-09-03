@@ -6,9 +6,19 @@ import { AGENT, beginSession, classifierFor, ensureSession } from './session.ts'
 import { clearSession, readSession, withSessionLock, writeSession } from './store.ts'
 import type { PendingEdit, SessionState } from './store.ts'
 import { enqueue, flush } from './queue.ts'
-import { currentToken, postInsight } from './api.ts'
+import { currentToken, postInsight, postLiveFeedback } from './api.ts'
 import { record } from './receipt.ts'
 import type { CodingEvent, InsightSubmission } from './types.ts'
+
+// Feature 0098. The opportunistic flush from `onPostToolUse` (below) is what
+// makes the coding surface's live feed actually live rather than
+// batched-until-Stop, but it also runs on the developer's critical path for
+// EVERY tool call, unlike the full-budget flush at Stop/SessionEnd/
+// SessionStart. A short, separate timeout means a slow or unreachable backend
+// costs at most this much typing latency, once per tool call, never the full
+// HOOK_TIMEOUT_MS: a failed live flush just leaves the event queued for the
+// next natural flush point (see queue.ts's `flush()` for why nothing is lost).
+const LIVE_FLUSH_TIMEOUT_MS = 400
 
 // The four hooks. All of type "command", because extraction is local.
 //
@@ -91,6 +101,12 @@ export async function onPostToolUse(payload: RawPayload): Promise<HookOutcome> {
 
   const queued = enqueue(AGENT, sessionId, events)
   record(queued, 1)
+  // Feature 0098. Opportunistic, bounded, and never awaited past its own short
+  // timeout: this is what a tool call shows up on the live feed within
+  // seconds instead of only at the next Stop/SessionEnd. A slow or
+  // unreachable backend leaves the event queued, not lost (see
+  // LIVE_FLUSH_TIMEOUT_MS above).
+  if (queued.length > 0) await flush({ timeoutMs: LIVE_FLUSH_TIMEOUT_MS })
   return { sent: queued.length, inert: false, reason: null }
 }
 
@@ -102,14 +118,20 @@ export async function onStop(payload: RawPayload): Promise<HookOutcome> {
   if (state.inert) return { sent: 0, inert: true, reason: state.inertReason }
 
   const events: CodingEvent[] = []
-  // Feature 0094. Built inside the lock (turnId material must not race a
-  // concurrent Stop), sent outside it (a network call must never hold the
+  // Feature 0094 / 0098. Built inside the lock (turnId material must not race
+  // a concurrent Stop), sent outside it (a network call must never hold the
   // session file lock, same reason enqueue/flush already happen after this
-  // block ends below).
-  let insightSubmissions: InsightSubmission[] = []
+  // block ends below). One sweep, two independent destinations: see feature
+  // 0098's Decisions for why prompt insights and live feedback share the read
+  // but not the opt-in.
+  let turnSubmissions: InsightSubmission[] = []
+  let sendToInsights = false
+  let sendToLiveFeedback = false
   withSessionLock(sessionId, () => {
     const live = readSession(sessionId) ?? state
     events.push(...settleEdits(live))
+    sendToInsights = live.promptInsightsEnabled
+    sendToLiveFeedback = live.liveFeedbackEnabled
 
     if (transcript) {
       const sweep = sweepTranscript(transcript, {
@@ -132,13 +154,13 @@ export async function onStop(payload: RawPayload): Promise<HookOutcome> {
         })
       }
 
-      // Only when this developer's own effective policy is on. Everyone else
-      // takes exactly the path above and this block never runs, never reads
-      // a message body, never allocates a string that could hold one.
-      if (live.promptInsightsEnabled) {
+      // Only when at least one of the two effective policies is on. Everyone
+      // else takes exactly the path above and this block never runs, never
+      // reads a message body, never allocates a string that could hold one.
+      if (sendToInsights || sendToLiveFeedback) {
         const insightSweep = sweepPromptInsightTurns(transcript, live.promptInsightLineOffset)
         live.promptInsightLineOffset = insightSweep.lineOffset
-        insightSubmissions = insightSweep.turns.map((turn) => {
+        turnSubmissions = insightSweep.turns.map((turn) => {
           live.promptInsightSeq += 1
           return {
             sessionId,
@@ -161,25 +183,40 @@ export async function onStop(payload: RawPayload): Promise<HookOutcome> {
   // from PostToolUse, which never fires for a decline.
   record(queued, queued.filter((event) => event.decision === 'rejected').length)
   await flush()
-  await sendPromptInsights(insightSubmissions)
+  await sendTurnSubmissions(turnSubmissions, sendToInsights, sendToLiveFeedback)
   return { sent: queued.length, inert: false, reason: null }
 }
 
-// Feature 0094. Best effort, one attempt, never queued to disk: `prompt` and
-// `response` exist as values only for the span of this function. A failure
-// here is a missing Description data point for this one turn, not a reason
-// to hold real content anywhere longer than one request needs it (same
-// no-retry shape as the backend's own coding-insights queue).
-async function sendPromptInsights(submissions: InsightSubmission[]): Promise<void> {
-  if (submissions.length === 0) return
+// Feature 0094 / 0098. Best effort, one attempt per destination, never queued
+// to disk: `prompt` and `response` exist as values only for the span of this
+// function. A failure here is a missing data point for this one turn, not a
+// reason to hold real content anywhere longer than one request needs it (same
+// no-retry shape as the backend's own coding-insights / coding-live-feedback
+// queues). `toInsights` and `toLiveFeedback` are independent: a turn opted
+// into both is sent to both, from the one extracted copy, never re-swept.
+async function sendTurnSubmissions(
+  submissions: InsightSubmission[],
+  toInsights: boolean,
+  toLiveFeedback: boolean,
+): Promise<void> {
+  if (submissions.length === 0 || (!toInsights && !toLiveFeedback)) return
   const creds = await currentToken(AGENT)
   if (!creds) return
   for (const submission of submissions) {
-    try {
-      await postInsight(creds.apiUrl, creds.accessToken, submission)
-    } catch {
-      // Fire and forget. Nothing about a failed scoring pass is worth a
-      // retry loop holding this developer's words in memory any longer.
+    if (toInsights) {
+      try {
+        await postInsight(creds.apiUrl, creds.accessToken, submission)
+      } catch {
+        // Fire and forget. Nothing about a failed scoring pass is worth a
+        // retry loop holding this developer's words in memory any longer.
+      }
+    }
+    if (toLiveFeedback) {
+      try {
+        await postLiveFeedback(creds.apiUrl, creds.accessToken, submission)
+      } catch {
+        // Same reasoning as above.
+      }
     }
   }
 }

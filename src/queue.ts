@@ -53,7 +53,15 @@ export function enqueue(agent: AgentId, sessionId: string, events: CodingEvent[]
   return fresh
 }
 
-export async function flush(): Promise<FlushResult> {
+// Feature 0098. `opts.timeoutMs`, when given, overrides the default per-request
+// budget (api.ts's HOOK_TIMEOUT_MS) for every request this call makes. Used by
+// `onPostToolUse`'s opportunistic live flush: that call sits on the developer's
+// critical path for every tool call, not just at Stop/SessionEnd, so it must
+// fail fast on a slow network rather than hold up typing. A request that times
+// out lands in `failed` exactly like any other failure and stays queued for the
+// next full-budget flush (Stop/SessionEnd/next SessionStart), so nothing is
+// ever lost, only delayed.
+export async function flush(opts: { timeoutMs?: number } = {}): Promise<FlushResult> {
   const queued = readQueue()
   if (queued.length === 0) return { attempted: 0, sent: 0, remaining: 0, delivered: true }
 
@@ -74,7 +82,7 @@ export async function flush(): Promise<FlushResult> {
         group.sessionId,
         chunk.map((r) => r.event),
       )
-      let res = await postEvents(creds.apiUrl, creds.accessToken, batch)
+      let res = await postEvents(creds.apiUrl, creds.accessToken, batch, opts.timeoutMs)
       // The one failure /events surfaces. Everything else on this route is a 202
       // and must not be retried as if it were an error.
       if (res.status === 401) {
@@ -84,7 +92,7 @@ export async function flush(): Promise<FlushResult> {
           continue
         }
         creds = renewed
-        res = await postEvents(creds.apiUrl, creds.accessToken, batch)
+        res = await postEvents(creds.apiUrl, creds.accessToken, batch, opts.timeoutMs)
       }
       if (isOk(res.status)) sent += chunk.length
       else failed.push(...chunk)

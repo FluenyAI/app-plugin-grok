@@ -2,7 +2,14 @@ import { CLIENT_VERSION, currentToken, isOk, refresh, sessionStart } from './api
 import type { Credentials } from './store.ts'
 import { findRepo } from './git.ts'
 import { repoIdFor } from './repo-id.ts'
-import { readBundle, readSession, writeBundle, writePromptInsightsEnabled, writeSession } from './store.ts'
+import {
+  readBundle,
+  readSession,
+  writeBundle,
+  writeLiveFeedbackEnabled,
+  writePromptInsightsEnabled,
+  writeSession,
+} from './store.ts'
 import type { SessionState } from './store.ts'
 import type { AgentId, PolicyBundle, SessionStartResponse } from './types.ts'
 import { readsLocallyDeclaration } from './reads.ts'
@@ -73,6 +80,7 @@ export async function beginSession(opts: {
     promptInsightsEnabled: false,
     promptInsightLineOffset: 0,
     promptInsightSeq: 0,
+    liveFeedbackEnabled: false,
   }
 
   const creds = await currentToken(AGENT)
@@ -125,6 +133,10 @@ export async function beginSession(opts: {
   // just now". Fail closed on absence, same as every other optional field.
   const promptInsightsEnabled = answer.promptInsightsEnabled ?? false
   writePromptInsightsEnabled(promptInsightsEnabled)
+  // Feature 0098. Same discipline as promptInsightsEnabled above, independent
+  // opt-in.
+  const liveFeedbackEnabled = answer.liveFeedbackEnabled ?? false
+  writeLiveFeedbackEnabled(liveFeedbackEnabled)
 
   const state: SessionState = {
     ...base,
@@ -132,6 +144,7 @@ export async function beginSession(opts: {
     dryRun: answer.dryRun,
     dryRunEndsAt: answer.dryRunEndsAt,
     promptInsightsEnabled,
+    liveFeedbackEnabled,
   }
 
   if (answer.killSwitch) {

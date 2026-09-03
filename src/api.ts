@@ -5,6 +5,7 @@ import type {
   CodingEventBatch,
   DeviceCodeGrant,
   InsightSubmission,
+  LiveFeedbackSubmission,
   SessionStartRequest,
   SessionStartResponse,
   TokenResponse,
@@ -157,12 +158,20 @@ export function sessionStart(
 // says nothing about whether the events were kept. Nothing in this client may
 // branch on it as if it did (CEO decision 6A). The one exception is 401, which
 // is the client's own credential expiring and is the caller's cue to refresh.
+//
+// Feature 0098. `timeoutMs` is exposed (not just HOOK_TIMEOUT_MS's default) so
+// the opportunistic live flush from `PostToolUse` (queue.ts's `flush()`) can
+// pass a much shorter budget: that call sits on the developer's critical path
+// for every tool call, not just at Stop/SessionEnd, so it must fail fast and
+// leave the event queued for the next natural flush point rather than hold up
+// typing while it waits out the full budget.
 export function postEvents(
   base: string,
   token: string,
   batch: CodingEventBatch,
+  timeoutMs?: number,
 ): Promise<HttpResult<unknown>> {
-  return request(base, 'POST', '/integrations/coding/events', { token, body: batch })
+  return request(base, 'POST', '/integrations/coding/events', { token, body: batch, timeoutMs })
 }
 
 // Feature 0094. Deliberately not queued through store.ts's queue.jsonl the
@@ -179,4 +188,15 @@ export function postInsight(
   submission: InsightSubmission,
 ): Promise<HttpResult<unknown>> {
   return request(base, 'POST', '/integrations/coding/insights', { token, body: submission })
+}
+
+// Feature 0098. Mirrors postInsight() exactly, on the separate opt-in and
+// separate endpoint (see feature 0098's Decisions): same no-retry, no-disk-queue
+// shape, same reasoning.
+export function postLiveFeedback(
+  base: string,
+  token: string,
+  submission: LiveFeedbackSubmission,
+): Promise<HttpResult<unknown>> {
+  return request(base, 'POST', '/integrations/coding/live-feedback', { token, body: submission })
 }
