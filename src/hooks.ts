@@ -74,6 +74,8 @@ export async function onPostToolUse(payload: RawPayload): Promise<HookOutcome> {
       at: new Date().toISOString(),
       repoId: live.repoId,
       pathClass: facts.pathClass,
+      toolCategory: facts.toolCategory,
+      ...(facts.commandCategory ? { commandCategory: facts.commandCategory } : {}),
     })
 
     if (facts.isEdit) {
