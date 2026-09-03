@@ -11,7 +11,7 @@ import type {
   TokenResponse,
 } from './types.ts'
 
-export const CLIENT_VERSION = '0.1.0-spike.2'
+export const CLIENT_VERSION = '0.1.0-spike.3'
 export const DEFAULT_CLIENT_ID = 'flueny-claude-code'
 // Production. This is only a fallback: `login` prefers --api-url, then
 // FLUENY_API_URL, and every hook afterwards reads the apiUrl stored in the
