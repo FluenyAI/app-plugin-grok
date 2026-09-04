@@ -106,6 +106,12 @@ export interface SessionStartResponse {
   // the separate live-feedback opt-in (see feature 0098's Decisions for why
   // these are two flags, not one).
   liveFeedbackEnabled?: boolean
+  // Feature 0109. Same fail-closed rule again, for the third and most
+  // sensitive opt-in: whether extraction may return a real file path and Bash
+  // command text at all (see extract.ts's header comment). Independent of the
+  // other two -- a developer can have live feedback on and raw activity off,
+  // which just means the coaching rubric sees toolCategory/pathClass only.
+  rawActivityEnabled?: boolean
 }
 
 // Feature 0094. The only shape in this client allowed to carry prompt or
@@ -139,6 +145,40 @@ export interface LiveFeedbackSubmission {
   prompt: string
   response: string
   at: string
+  // Feature 0109. This turn's tool-call activity, so the coaching rubric can
+  // reference specific actions instead of only the prompt/response text.
+  // toolCategory/pathClass are always populated (bounded, no new consent);
+  // rawPath/rawCommand are present per-entry only when rawActivityEnabled was
+  // true at the moment that tool call happened. Never present on
+  // InsightSubmission below -- that DTO stays exactly as feature 0094 defined
+  // it, since prompt-insight scoring has no use for tool activity.
+  toolActivity?: ToolActivityEntry[]
+}
+
+// Feature 0109. One tool call's worth of coaching context. Bounded the same
+// way CodingEvent's toolCategory/pathClass already are; rawPath/rawCommand are
+// the two fields the whole feature exists to add, so they alone are optional
+// and gated on the raw-activity opt-in, not on toolActivity's own presence.
+export interface ToolActivityEntry {
+  toolCategory: CodingToolCategory
+  pathClass: string | null
+  rawPath?: string
+  rawCommand?: string
+}
+
+// Feature 0109. The only shape in this client that ever carries a real file
+// path or real command text outside of ToolActivityEntry above (and only ever
+// when SessionState.rawActivityEnabled is true). Deliberately its own DTO and
+// its own endpoint, never folded into CodingEvent / CODING_EVENT_FIELDS: that
+// pipeline feeds coding_signal and every rollup this backend computes, and
+// raw path/command must never reach either. eventId correlates this detail to
+// the structural CodingEvent already sent for the same tool call.
+export interface RawActivityDetail {
+  sessionId: string
+  eventId: string
+  at: string
+  rawPath?: string
+  rawCommand?: string
 }
 
 export interface DeviceCodeGrant {

@@ -96,4 +96,62 @@ describe('extractToolFacts', () => {
     assert.equal(web.toolCategory, 'web')
     assert.equal(unknown.toolCategory, 'other')
   })
+
+  it('never returns rawPath or rawCommand when includeRaw is absent or false', () => {
+    const noOpt = extractToolFacts(
+      { toolName: 'Edit', toolInput: { file_path: '/repo/src/auth/session.ts' } },
+      { repoRoot: '/repo', classifier: BUNDLE.pathClassifier },
+    )
+    const explicitFalse = extractToolFacts(
+      { toolName: 'Bash', toolInput: { command: 'git checkout my-branch' } },
+      { repoRoot: '/repo', classifier: BUNDLE.pathClassifier, includeRaw: false },
+    )
+    assert.equal('rawPath' in noOpt, false)
+    assert.equal('rawCommand' in noOpt, false)
+    assert.equal('rawPath' in explicitFalse, false)
+    assert.equal('rawCommand' in explicitFalse, false)
+  })
+
+  it('returns the real repo-relative path when includeRaw is true', () => {
+    const facts = extractToolFacts(
+      { toolName: 'Edit', toolInput: { file_path: '/repo/src/auth/session.ts' } },
+      { repoRoot: '/repo', classifier: BUNDLE.pathClassifier, includeRaw: true },
+    )
+    assert.equal(facts.rawPath, 'src/auth/session.ts')
+    assert.equal('rawCommand' in facts, false)
+  })
+
+  it('returns the real Bash command text when includeRaw is true, only for bash', () => {
+    const bash = extractToolFacts(
+      { toolName: 'Bash', toolInput: { command: 'git checkout my-branch' } },
+      { repoRoot: '/repo', classifier: BUNDLE.pathClassifier, includeRaw: true },
+    )
+    assert.equal(bash.rawCommand, 'git checkout my-branch')
+
+    const read = extractToolFacts(
+      { toolName: 'Read', toolInput: { file_path: '/repo/README.md' } },
+      { repoRoot: '/repo', classifier: BUNDLE.pathClassifier, includeRaw: true },
+    )
+    assert.equal('rawCommand' in read, false)
+  })
+
+  it('truncates rawPath and rawCommand at 500 chars rather than sending the whole thing', () => {
+    const longSegment = 'x'.repeat(600)
+    const facts = extractToolFacts(
+      {
+        toolName: 'Bash',
+        toolInput: { command: `echo ${longSegment}` },
+      },
+      { repoRoot: '/repo', classifier: BUNDLE.pathClassifier, includeRaw: true },
+    )
+    assert.equal(facts.rawCommand?.length, 500)
+  })
+
+  it('never returns a path outside the repository, even with includeRaw true', () => {
+    const facts = extractToolFacts(
+      { toolName: 'Read', toolInput: { file_path: '/Users/someone/private/notes.md' } },
+      { repoRoot: '/repo', classifier: BUNDLE.pathClassifier, includeRaw: true },
+    )
+    assert.equal('rawPath' in facts, false)
+  })
 })

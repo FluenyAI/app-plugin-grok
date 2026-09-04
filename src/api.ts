@@ -6,6 +6,7 @@ import type {
   DeviceCodeGrant,
   InsightSubmission,
   LiveFeedbackSubmission,
+  RawActivityDetail,
   SessionStartRequest,
   SessionStartResponse,
   TokenResponse,
@@ -199,4 +200,20 @@ export function postLiveFeedback(
   submission: LiveFeedbackSubmission,
 ): Promise<HttpResult<unknown>> {
   return request(base, 'POST', '/integrations/coding/live-feedback', { token, body: submission })
+}
+
+// Feature 0109. Mirrors postInsight()/postLiveFeedback(): not queued through
+// store.ts's queue.jsonl, best effort, dropped on any failure rather than
+// persisted to disk to retry later. Unlike those two, this is called from
+// onPostToolUse (the developer's critical path for every tool call, not just
+// at Stop), so `timeoutMs` is exposed the same way postEvents() exposes it for
+// the opportunistic live flush -- the caller passes a short cap, not the full
+// HOOK_TIMEOUT_MS.
+export function postRawActivity(
+  base: string,
+  token: string,
+  detail: RawActivityDetail,
+  timeoutMs?: number,
+): Promise<HttpResult<unknown>> {
+  return request(base, 'POST', '/integrations/coding/raw-activity', { token, body: detail, timeoutMs })
 }

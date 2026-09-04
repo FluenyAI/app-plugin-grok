@@ -6,14 +6,27 @@ import type { CodingCommandCategory, CodingToolCategory } from './types.ts'
 // Local extraction. This is the point of the whole product.
 //
 // Everything Claude Code hands a hook arrives here: the prompt-shaped fields, the
-// tool arguments, the tool result. What leaves this module is a `ToolFacts`: a
-// handful of booleans, one opaque id and one short class label. There is no field
-// on `ToolFacts` that can hold a path, a command, a diff or a response body, so
-// the discard is structural rather than a promise about calling code.
+// tool arguments, the tool result. What leaves this module by default is a
+// `ToolFacts`: a handful of booleans, one opaque id and one short class label.
+// There is no field on `ToolFacts` that can hold a diff, file contents, a tool
+// response body or an environment variable -- that discard is structural and
+// unconditional, not a promise about calling code, and nothing in this file
+// changes it.
+//
+// Feature 0109 is the one deliberate exception: when the developer has
+// explicitly opted into `rawActivityEnabled` (resolved server-side, threaded in
+// as `opts.includeRaw`), extraction is ALSO allowed to return exactly two
+// bounded strings: the repo-relative file path (`rawPath`, the same value
+// `pathClass` is already derived from) and the Bash command text (`rawCommand`,
+// only for a tool this file already classifies as `toolCategory: 'bash'`), each
+// truncated to MAX_RAW_LENGTH. `includeRaw` defaults to false, so a caller that
+// forgets to pass it gets the original, fully structural behaviour.
 //
 // The raw payload is never written to disk and never returned from these
 // functions. test/redaction.test.ts drives a payload stuffed with markers through
-// extraction and serialization and fails if any of them survives.
+// extraction and serialization and fails if any of them survives -- including,
+// with `includeRaw: true`, a positive-case assertion that ONLY the real path and
+// the real command text cross that boundary, and nothing else ever does.
 
 export type RawPayload = Record<string, unknown>
 
@@ -40,6 +53,25 @@ export interface ToolFacts {
   // does, so this is a rename of an existing signal for that one category, not
   // a new detector.
   commandCategory: CodingCommandCategory | null
+  // Feature 0109. Present ONLY when opts.includeRaw was true AND a non-empty
+  // repo-relative path exists. Absent, not null: absence is the only way this
+  // shape can mean "no raw path available", so a bug cannot forward `null` and
+  // have it misread as "raw data was requested but there was none".
+  rawPath?: string
+  // Feature 0109. Present ONLY when opts.includeRaw was true AND toolCategory
+  // is 'bash' AND a command string exists. Same absent-not-null discipline as
+  // rawPath.
+  rawCommand?: string
+}
+
+// Feature 0109. Both rawPath and rawCommand are truncated to this length before
+// they ever leave extractToolFacts, so a pathologically long input cannot turn
+// this opt-in channel into an exfiltration vector for more than a bounded
+// amount of text per tool call.
+const MAX_RAW_LENGTH = 500
+
+function truncate(value: string, max: number): string {
+  return value.length > max ? value.slice(0, max) : value
 }
 
 const EDIT_TOOLS = new Set([
@@ -98,7 +130,7 @@ const TEST_COMMAND = new RegExp(
 
 export function extractToolFacts(
   payload: RawPayload,
-  opts: { repoRoot: string | null; classifier: Record<string, string[]> },
+  opts: { repoRoot: string | null; classifier: Record<string, string[]>; includeRaw?: boolean },
 ): ToolFacts {
   const toolName = firstString(payload, ['tool_name', 'toolName']) ?? ''
   const lower = toolName.toLowerCase()
@@ -108,13 +140,15 @@ export function extractToolFacts(
       ? payload.toolInput
       : {}
 
-  const rawPath = firstString(input, ['file_path', 'notebook_path', 'path', 'filePath'])
-  const pathClass = rawPath ? classifyPath(opts.classifier, toRepoRelative(rawPath, opts.repoRoot)) : null
+  const filePath = firstString(input, ['file_path', 'notebook_path', 'path', 'filePath'])
+  const repoRelativePath = filePath !== null ? toRepoRelative(filePath, opts.repoRoot) : null
+  const pathClass = repoRelativePath !== null ? classifyPath(opts.classifier, repoRelativePath) : null
 
   const command = firstString(input, ['command'])
   const isEdit = EDIT_TOOLS.has(lower)
   const isTestCommand = command !== null && TEST_COMMAND.test(command)
   const toolCategory = classifyTool(lower, isEdit)
+  const includeRaw = opts.includeRaw ?? false
 
   return {
     toolUseId: firstString(payload, ['tool_use_id', 'toolUseId']),
@@ -125,6 +159,10 @@ export function extractToolFacts(
     declined: looksDeclined(payload.tool_response ?? payload.toolResult),
     toolCategory,
     commandCategory: toolCategory === 'bash' ? (isTestCommand ? 'test' : 'other') : null,
+    ...(includeRaw && repoRelativePath ? { rawPath: truncate(repoRelativePath, MAX_RAW_LENGTH) } : {}),
+    ...(includeRaw && toolCategory === 'bash' && command !== null
+      ? { rawCommand: truncate(command, MAX_RAW_LENGTH) }
+      : {}),
   }
 }
 

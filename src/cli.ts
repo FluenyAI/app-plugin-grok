@@ -27,6 +27,7 @@ import {
   readLiveFeedbackEnabled,
   readPromptInsightsEnabled,
   readQueue,
+  readRawActivityEnabled,
   readReceiptDay,
   today,
   writeCredentials,
@@ -278,6 +279,10 @@ async function status(): Promise<number> {
     `Prompt scoring   ${readPromptInsightsEnabled() ? "on: your prompts and the agent's replies are sent for scoring" : 'off: neither ever leaves this machine'}`,
     // Feature 0098. Same reasoning as Prompt scoring above: cached, not fetched.
     `Live feedback    ${readLiveFeedbackEnabled() ? "on: your prompts and the agent's replies are sent for a real-time coaching nudge" : 'off: neither ever leaves this machine'}`,
+    // Feature 0109. Same reasoning again: cached, not fetched. The one opt-in
+    // that sends a real file path or real command text, so it gets its own
+    // explicit line rather than folding into Live feedback above.
+    `Raw activity     ${readRawActivityEnabled() ? 'on: real file paths and Bash command text may be sent' : 'off: neither ever leaves this machine'}`,
   ]
   say(lines.join('\n'))
 

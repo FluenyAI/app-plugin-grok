@@ -8,6 +8,7 @@ import {
   writeBundle,
   writeLiveFeedbackEnabled,
   writePromptInsightsEnabled,
+  writeRawActivityEnabled,
   writeSession,
 } from './store.ts'
 import type { SessionState } from './store.ts'
@@ -81,6 +82,8 @@ export async function beginSession(opts: {
     promptInsightLineOffset: 0,
     promptInsightSeq: 0,
     liveFeedbackEnabled: false,
+    rawActivityEnabled: false,
+    turnToolActivity: [],
   }
 
   const creds = await currentToken(AGENT)
@@ -137,6 +140,9 @@ export async function beginSession(opts: {
   // opt-in.
   const liveFeedbackEnabled = answer.liveFeedbackEnabled ?? false
   writeLiveFeedbackEnabled(liveFeedbackEnabled)
+  // Feature 0109. Same discipline again, for the raw-activity opt-in.
+  const rawActivityEnabled = answer.rawActivityEnabled ?? false
+  writeRawActivityEnabled(rawActivityEnabled)
 
   const state: SessionState = {
     ...base,
@@ -145,6 +151,7 @@ export async function beginSession(opts: {
     dryRunEndsAt: answer.dryRunEndsAt,
     promptInsightsEnabled,
     liveFeedbackEnabled,
+    rawActivityEnabled,
   }
 
   if (answer.killSwitch) {

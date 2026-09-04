@@ -6,9 +6,9 @@ import { AGENT, beginSession, classifierFor, ensureSession } from './session.ts'
 import { clearSession, readSession, withSessionLock, writeSession } from './store.ts'
 import type { PendingEdit, SessionState } from './store.ts'
 import { enqueue, flush } from './queue.ts'
-import { currentToken, postInsight, postLiveFeedback } from './api.ts'
+import { currentToken, postInsight, postLiveFeedback, postRawActivity } from './api.ts'
 import { record } from './receipt.ts'
-import type { CodingEvent, InsightSubmission } from './types.ts'
+import type { CodingEvent, InsightSubmission, LiveFeedbackSubmission, ToolActivityEntry } from './types.ts'
 
 // Feature 0098. The opportunistic flush from `onPostToolUse` (below) is what
 // makes the coding surface's live feed actually live rather than
@@ -19,6 +19,13 @@ import type { CodingEvent, InsightSubmission } from './types.ts'
 // HOOK_TIMEOUT_MS: a failed live flush just leaves the event queued for the
 // next natural flush point (see queue.ts's `flush()` for why nothing is lost).
 const LIVE_FLUSH_TIMEOUT_MS = 400
+
+// Feature 0109. `turnToolActivity` accumulates one entry per tool call between
+// Stop cycles, feeding the live-feedback rubric's tool-activity context. Once
+// at the cap, later calls in the same turn are simply not added -- the
+// simplest bound, and consistent with this being coaching context for an LLM
+// prompt, not an audit log that needs to be complete.
+const MAX_TURN_TOOL_ACTIVITY = 50
 
 // The four hooks. All of type "command", because extraction is local.
 //
@@ -55,8 +62,16 @@ export async function onPostToolUse(payload: RawPayload): Promise<HookOutcome> {
   const state = await ensureSession(sessionId, cwd)
   if (state.inert) return { sent: 0, inert: true, reason: state.inertReason }
 
-  const facts = extractToolFacts(payload, { repoRoot: state.repoRoot, classifier: classifierFor() })
+  const facts = extractToolFacts(payload, {
+    repoRoot: state.repoRoot,
+    classifier: classifierFor(),
+    includeRaw: state.rawActivityEnabled,
+  })
   const events: CodingEvent[] = []
+  // Feature 0109. Set inside the lock below only when this call was not a
+  // dedupe-skip, so a duplicate PostToolUse never fires postRawActivity twice
+  // for the same tool call either.
+  let rawActivityEventId: string | null = null
 
   withSessionLock(sessionId, () => {
     const live = readSession(sessionId) ?? state
@@ -68,8 +83,10 @@ export async function onPostToolUse(payload: RawPayload): Promise<HookOutcome> {
     if (facts.kind === 'subagent') live.subagents += 1
     if (facts.isTestCommand) live.testsRanThisTurn = true
 
+    const eventId = `${facts.kind === 'subagent' ? 'sa' : 'tu'}:${sessionId}:${id}`
+    rawActivityEventId = eventId
     events.push({
-      eventId: `${facts.kind === 'subagent' ? 'sa' : 'tu'}:${sessionId}:${id}`,
+      eventId,
       kind: facts.kind,
       at: new Date().toISOString(),
       repoId: live.repoId,
@@ -77,6 +94,19 @@ export async function onPostToolUse(payload: RawPayload): Promise<HookOutcome> {
       toolCategory: facts.toolCategory,
       ...(facts.commandCategory ? { commandCategory: facts.commandCategory } : {}),
     })
+
+    // Feature 0109. toolCategory/pathClass are bounded and always recorded,
+    // independent of rawActivityEnabled -- they improve the live-feedback
+    // rubric even for a developer who has live feedback on but raw activity
+    // off. rawPath/rawCommand ride along only when facts carries them.
+    if (live.turnToolActivity.length < MAX_TURN_TOOL_ACTIVITY) {
+      live.turnToolActivity.push({
+        toolCategory: facts.toolCategory,
+        pathClass: facts.pathClass,
+        ...(facts.rawPath !== undefined ? { rawPath: facts.rawPath } : {}),
+        ...(facts.rawCommand !== undefined ? { rawCommand: facts.rawCommand } : {}),
+      })
+    }
 
     if (facts.isEdit) {
       if (facts.declined) {
@@ -109,6 +139,33 @@ export async function onPostToolUse(payload: RawPayload): Promise<HookOutcome> {
   // unreachable backend leaves the event queued, not lost (see
   // LIVE_FLUSH_TIMEOUT_MS above).
   if (queued.length > 0) await flush({ timeoutMs: LIVE_FLUSH_TIMEOUT_MS })
+
+  // Feature 0109. Same critical-path discipline as the live flush above: a
+  // short, separate timeout, best effort, never queued to disk (rawPath and
+  // rawCommand exist as values only for the span of this call, same reasoning
+  // as postInsight/postLiveFeedback). Fired after the structural flush so it
+  // never contends with the queue for the same short budget.
+  if (rawActivityEventId && (facts.rawPath !== undefined || facts.rawCommand !== undefined)) {
+    try {
+      const creds = await currentToken(AGENT)
+      if (creds) {
+        await postRawActivity(
+          creds.apiUrl,
+          creds.accessToken,
+          {
+            sessionId,
+            eventId: rawActivityEventId,
+            at: new Date().toISOString(),
+            ...(facts.rawPath !== undefined ? { rawPath: facts.rawPath } : {}),
+            ...(facts.rawCommand !== undefined ? { rawCommand: facts.rawCommand } : {}),
+          },
+          LIVE_FLUSH_TIMEOUT_MS,
+        )
+      }
+    } catch {
+      // Fire and forget, same reasoning as postInsight/postLiveFeedback.
+    }
+  }
   return { sent: queued.length, inert: false, reason: null }
 }
 
@@ -129,11 +186,18 @@ export async function onStop(payload: RawPayload): Promise<HookOutcome> {
   let turnSubmissions: InsightSubmission[] = []
   let sendToInsights = false
   let sendToLiveFeedback = false
+  // Feature 0109. Snapshot-and-reset every Stop, regardless of whether live
+  // feedback is even on: switching the opt-in on mid-session must not inherit
+  // a stale backlog from before it was enabled, and switching it off must not
+  // leak memory across an arbitrarily long session.
+  let toolActivity: ToolActivityEntry[] = []
   withSessionLock(sessionId, () => {
     const live = readSession(sessionId) ?? state
     events.push(...settleEdits(live))
     sendToInsights = live.promptInsightsEnabled
     sendToLiveFeedback = live.liveFeedbackEnabled
+    toolActivity = live.turnToolActivity
+    live.turnToolActivity = []
 
     if (transcript) {
       const sweep = sweepTranscript(transcript, {
@@ -185,21 +249,26 @@ export async function onStop(payload: RawPayload): Promise<HookOutcome> {
   // from PostToolUse, which never fires for a decline.
   record(queued, queued.filter((event) => event.decision === 'rejected').length)
   await flush()
-  await sendTurnSubmissions(turnSubmissions, sendToInsights, sendToLiveFeedback)
+  await sendTurnSubmissions(turnSubmissions, sendToInsights, sendToLiveFeedback, toolActivity)
   return { sent: queued.length, inert: false, reason: null }
 }
 
-// Feature 0094 / 0098. Best effort, one attempt per destination, never queued
-// to disk: `prompt` and `response` exist as values only for the span of this
-// function. A failure here is a missing data point for this one turn, not a
-// reason to hold real content anywhere longer than one request needs it (same
-// no-retry shape as the backend's own coding-insights / coding-live-feedback
-// queues). `toInsights` and `toLiveFeedback` are independent: a turn opted
-// into both is sent to both, from the one extracted copy, never re-swept.
+// Feature 0094 / 0098 / 0109. Best effort, one attempt per destination, never
+// queued to disk: `prompt` and `response` exist as values only for the span of
+// this function. A failure here is a missing data point for this one turn, not
+// a reason to hold real content anywhere longer than one request needs it
+// (same no-retry shape as the backend's own coding-insights /
+// coding-live-feedback queues). `toInsights` and `toLiveFeedback` are
+// independent: a turn opted into both is sent to both, from the one extracted
+// copy, never re-swept. `toolActivity` is built into a SEPARATE object only
+// for the live-feedback submission -- never attached to the InsightSubmission
+// sent to /insights, whose DTO has no field for it and would 400 the whole
+// request under this backend's forbidNonWhitelisted validation.
 async function sendTurnSubmissions(
   submissions: InsightSubmission[],
   toInsights: boolean,
   toLiveFeedback: boolean,
+  toolActivity: ToolActivityEntry[],
 ): Promise<void> {
   if (submissions.length === 0 || (!toInsights && !toLiveFeedback)) return
   const creds = await currentToken(AGENT)
@@ -215,7 +284,11 @@ async function sendTurnSubmissions(
     }
     if (toLiveFeedback) {
       try {
-        await postLiveFeedback(creds.apiUrl, creds.accessToken, submission)
+        const feedbackSubmission: LiveFeedbackSubmission = {
+          ...submission,
+          ...(toolActivity.length > 0 ? { toolActivity } : {}),
+        }
+        await postLiveFeedback(creds.apiUrl, creds.accessToken, feedbackSubmission)
       } catch {
         // Same reasoning as above.
       }
