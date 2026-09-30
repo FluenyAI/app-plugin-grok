@@ -8,8 +8,24 @@ import { useTempConfig } from './helpers.ts'
 
 useTempConfig()
 
-const { entryFor, record, receiptFor, summaryFor, entriesFor } = await import('../src/receipt.ts')
-import type { CodingEvent } from '../src/types.ts'
+const { entryFor, entryForInsight, record, recordInsight, receiptFor, summaryFor, entriesFor } = await import(
+  '../src/receipt.ts'
+)
+const { readCounters } = await import('../src/store.ts')
+import type { CodingEvent, InsightSubmission } from '../src/types.ts'
+
+function insight(over: Partial<InsightSubmission> = {}): InsightSubmission {
+  return {
+    sessionId: 's1',
+    turnId: 't1',
+    repoId: 'sha256:abc',
+    pathClass: null,
+    prompt: 'refactor the pricing module',
+    response: 'Refactored pricing.ts',
+    at: '2026-08-08T10:00:00.000Z',
+    ...over,
+  }
+}
 
 test('fieldsSent is generated from the serialized event, not written by hand', () => {
   const entry = entryFor({
@@ -71,4 +87,36 @@ test('observed counts raw tool calls and wouldSend counts derived events', () =>
   // Nothing is enforced in M1, so the zero is measured, not a placeholder.
   assert.match(receipt, /sent 2 derived signals/)
   assert.match(receipt, /blocked 0 actions/)
+})
+
+test('an insight entry lists prompt and response as field names, never their content', () => {
+  const entry = entryForInsight(insight())
+  assert.deepEqual(entry.fieldsSent, [
+    'sessionId',
+    'turnId',
+    'repoId',
+    'pathClass',
+    'prompt',
+    'response',
+    'at',
+  ])
+  assert.equal(entry.summary.includes('refactor the pricing module'), false)
+  assert.equal(entry.summary.includes('Refactored pricing.ts'), false)
+  assert.equal(entry.wouldBlock, false)
+})
+
+test('a delivered insight gets a ledger row and bumps insightsSent, not insightsFailed', () => {
+  const day = '2026-08-09'
+  recordInsight(insight({ at: '2026-08-09T10:00:00.000Z' }), true, day)
+  assert.equal(entriesFor(day).length, 1)
+  assert.equal(readCounters(day).insightsSent, 1)
+  assert.equal(readCounters(day).insightsFailed, 0)
+})
+
+test('a failed insight bumps insightsFailed and leaves no ledger row', () => {
+  const day = '2026-08-10'
+  recordInsight(insight({ at: '2026-08-10T10:00:00.000Z' }), false, day)
+  assert.equal(entriesFor(day).length, 0, 'a failed send never claims to be a row that left the machine')
+  assert.equal(readCounters(day).insightsSent, 0)
+  assert.equal(readCounters(day).insightsFailed, 1)
 })

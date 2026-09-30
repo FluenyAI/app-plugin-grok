@@ -115,6 +115,12 @@ export interface LedgerCounters {
   observed: number
   wouldSend: number
   wouldBlock: number
+  // Feature 0094. sendTurnSubmissions never retries and never queues to disk,
+  // so whether an attempt actually reached the backend is a fact a developer
+  // otherwise has no way to check. These two counters exist so that fact is
+  // local and answerable, the same reason every other counter here is.
+  insightsSent: number
+  insightsFailed: number
 }
 
 export interface LedgerEntry {
@@ -415,21 +421,30 @@ export function readLedger(day: string): LedgerEntry[] {
 // privacy claim stated as arithmetic.
 export function bumpCounters(day: string, delta: Partial<LedgerCounters>): LedgerCounters {
   const path = join(ledgerDir(), `${day}.counters.json`)
-  const current = readJson<LedgerCounters>(path) ?? { observed: 0, wouldSend: 0, wouldBlock: 0 }
+  // Read defensively per field, not just on the whole file: a counters.json
+  // written earlier the same day by a client that predates a new counter
+  // (insightsSent/insightsFailed, added 0094) still parses, it just lacks
+  // the new keys, and `undefined + delta` must not become the day's NaN.
+  const current = readJson<Partial<LedgerCounters>>(path) ?? {}
   const next: LedgerCounters = {
-    observed: current.observed + (delta.observed ?? 0),
-    wouldSend: current.wouldSend + (delta.wouldSend ?? 0),
-    wouldBlock: current.wouldBlock + (delta.wouldBlock ?? 0),
+    observed: (current.observed ?? 0) + (delta.observed ?? 0),
+    wouldSend: (current.wouldSend ?? 0) + (delta.wouldSend ?? 0),
+    wouldBlock: (current.wouldBlock ?? 0) + (delta.wouldBlock ?? 0),
+    insightsSent: (current.insightsSent ?? 0) + (delta.insightsSent ?? 0),
+    insightsFailed: (current.insightsFailed ?? 0) + (delta.insightsFailed ?? 0),
   }
   writePrivate(path, JSON.stringify(next))
   return next
 }
 
 export function readCounters(day: string): LedgerCounters {
-  return readJson<LedgerCounters>(join(ledgerDir(), `${day}.counters.json`)) ?? {
-    observed: 0,
-    wouldSend: 0,
-    wouldBlock: 0,
+  const stored = readJson<Partial<LedgerCounters>>(join(ledgerDir(), `${day}.counters.json`)) ?? {}
+  return {
+    observed: stored.observed ?? 0,
+    wouldSend: stored.wouldSend ?? 0,
+    wouldBlock: stored.wouldBlock ?? 0,
+    insightsSent: stored.insightsSent ?? 0,
+    insightsFailed: stored.insightsFailed ?? 0,
   }
 }
 

@@ -283,6 +283,11 @@ async function status(): Promise<number> {
     // that sends a real file path or real command text, so it gets its own
     // explicit line rather than folding into Live feedback above.
     `Raw activity     ${readRawActivityEnabled() ? 'on: real file paths and Bash command text may be sent' : 'off: neither ever leaves this machine'}`,
+    // Feature 0094. Delivered/failed today, not merely "the setting is on":
+    // sendTurnSubmissions never retries and never queues, so this is the only
+    // local evidence a submission actually reached the backend rather than
+    // failing silently on a hook that fails open by design.
+    `Insights today   ${counters.insightsSent} sent, ${counters.insightsFailed} failed`,
   ]
   say(lines.join('\n'))
 
@@ -346,7 +351,24 @@ function dryRun(argv: string[]): number {
     say(`            fields: ${entry.fieldsSent.join(', ')}`)
   }
   say('')
-  say(wrap('These field names are the whole payload. No prompt, no code and no file contents are in it.').join('\n'))
+  // "prompt" only ever appears as a field name on a row from prompt insight
+  // scoring (entryForInsight in receipt.ts), never on a CodingEvent row, so
+  // this is how the closing line stays true either way rather than claiming
+  // "no prompt is in it" beside a row whose fields say otherwise.
+  const anyInsightRow = entries.some((entry) => entry.fieldsSent.includes('prompt'))
+  if (anyInsightRow) {
+    say(
+      wrap(
+        'These field names are the whole payload for each row. No code and no file ' +
+          'contents are in any of it. Rows marked "Prompt scored for insight" are the ' +
+          'one exception to prompt text never leaving this machine: prompt insight ' +
+          'scoring is on, so those did send your prompt and the agent\'s reply, once ' +
+          'each, for a single scoring pass.',
+      ).join('\n'),
+    )
+  } else {
+    say(wrap('These field names are the whole payload. No prompt, no code and no file contents are in it.').join('\n'))
+  }
   markReceiptShown(day)
   return 0
 }

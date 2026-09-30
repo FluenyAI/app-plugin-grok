@@ -2,7 +2,7 @@ import { appendLedger, bumpCounters, readCounters, readLedger, today } from './s
 import type { LedgerEntry } from './store.ts'
 import { toWireEvent } from './wire.ts'
 import { dailyReceipt } from './copy.ts'
-import type { CodingEvent } from './types.ts'
+import type { CodingEvent, InsightSubmission } from './types.ts'
 
 // The local half of design decision 44. `GET /dry-run` is the server-rendered
 // receipt and stays authoritative; this is the copy on the developer's own disk,
@@ -54,6 +54,36 @@ export function record(events: CodingEvent[], observed: number, day = today()): 
   if (events.length === 0) return
   appendLedger(day, events.map(entryFor))
   bumpCounters(day, { wouldSend: events.length })
+}
+
+// Feature 0094. sendTurnSubmissions is fire-and-forget with no local queue, so
+// this is the one send in the client that has no other local trace: unlike
+// enqueue()/flush(), a failed insight leaves nothing on disk to inspect. The
+// entry's fieldsSent lists "prompt" and "response" as field NAMES, same rule
+// entryFor() already holds for CodingEvent: it says a prompt and a reply were
+// sent, never what either one said. Only a delivered submission gets a row,
+// because the ledger's whole claim is "this is what left", and a failed
+// attempt did not.
+export function summaryForInsight(): string {
+  return 'Prompt scored for insight (Description axis)'
+}
+
+export function entryForInsight(submission: InsightSubmission): LedgerEntry {
+  return {
+    at: submission.at,
+    summary: summaryForInsight(),
+    fieldsSent: Object.keys(submission),
+    wouldBlock: false,
+  }
+}
+
+export function recordInsight(submission: InsightSubmission, delivered: boolean, day = today()): void {
+  if (delivered) {
+    appendLedger(day, [entryForInsight(submission)])
+    bumpCounters(day, { insightsSent: 1 })
+  } else {
+    bumpCounters(day, { insightsFailed: 1 })
+  }
 }
 
 export function receiptFor(day = today()): string {
