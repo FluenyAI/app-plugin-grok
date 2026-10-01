@@ -1,9 +1,10 @@
 @../app-docs/CLAUDE.md
 @../app-docs/FEATURES/INDEX.md
 
-# app-plugin-claude-code
+# app-plugin-grok
 
-The Claude Code client for the Flueny coding agent surface. Separate repo per eng finding 10,
+The Grok client for the Flueny coding agent surface. Its `src/` is kept byte identical to
+`app-plugin-claude-code`, so a change to one is mirrored in the other. Separate repo per eng finding 10,
 with tests from commit one.
 
 If the two imports at the top of this file did not resolve, `app-docs` is not checked out as a
