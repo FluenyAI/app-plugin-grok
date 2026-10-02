@@ -5,6 +5,10 @@
       "components": {
         "commands": [
           {
+            "name": "api",
+            "description": "Show or change which Flueny this machine reports to (staging, production, or a URL)"
+          },
+          {
             "name": "connect",
             "description": "Connect this machine to Flueny (device sign-in, no bash required)"
           },
@@ -18,10 +22,21 @@
           }
         ],
         "hooks": [
-          { "name": "SessionStart" },
-          { "name": "PostToolUse" },
-          { "name": "Stop" },
-          { "name": "SessionEnd" }
+          {
+            "name": "SessionStart"
+          },
+          {
+            "name": "PostToolUse"
+          },
+          {
+            "name": "PostToolUseFailure"
+          },
+          {
+            "name": "Stop"
+          },
+          {
+            "name": "SessionEnd"
+          }
         ]
       }
     }

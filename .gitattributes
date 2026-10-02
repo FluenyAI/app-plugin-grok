@@ -1,0 +1,4 @@
+# The per-platform client binaries are build output, committed so a marketplace
+# install (a git clone) works with no compiler and no network. Never diffed or
+# merged as text, and never line-ending converted.
+bin/* binary

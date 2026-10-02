@@ -14,7 +14,7 @@ the other, and the credential from one is meaningless to the other.
 1. Show where this machine currently reports:
 
    ```sh
-   node "${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/src/cli.ts" api
+   sh "${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/flueny.sh" api
    ```
 
 2. If the user did not name a target, stop here and report what it said. Do not
@@ -24,7 +24,7 @@ the other, and the credential from one is meaningless to the other.
    (or `GROK_PLUGIN_ROOT` is set); Claude Code omits the flag.
 
    ```sh
-   node "${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/src/cli.ts" api <staging|production|URL>
+   sh "${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/flueny.sh" api <staging|production|URL>
    ```
 
    This is a sign-in, not a settings change: it prints a code and a link and
@@ -35,7 +35,7 @@ the other, and the credential from one is meaningless to the other.
 4. Confirm the result rather than assuming it worked:
 
    ```sh
-   node "${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/src/cli.ts" status
+   sh "${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/flueny.sh" status
    ```
 
    Report the `API` line back. If the session is inert, say so and say why: a

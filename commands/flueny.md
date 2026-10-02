@@ -16,7 +16,7 @@ Run `/flueny:status` first and report what it says. It checks the whole chain
 and names the first broken link:
 
 ```sh
-node "${CLAUDE_PLUGIN_ROOT}/src/cli.ts" status
+sh "${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/flueny.sh" status
 ```
 
 - Not signed in on this machine, run `/flueny:connect`.

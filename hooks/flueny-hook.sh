@@ -1,39 +1,31 @@
 #!/bin/sh
-# Runs one Flueny hook.
+# Runs one Flueny hook: `sh flueny-hook.sh <event>`, from hooks/hooks.json.
 #
-# Why a wrapper rather than `node ... cli.ts` straight from hooks.json: a hook
-# does not inherit an interactive shell's environment, so a developer using nvm,
-# asdf, fnm or Homebrew node may have no `node` on PATH at all. The previous
-# installer solved that by baking the absolute nvm binary into the settings
-# block, which then broke whenever they changed node version.
+# The client is a native binary per platform, committed under bin/. This picks the
+# one for this machine and execs it, so the hook costs one process, not a shell
+# plus an interpreter.
 #
-# Every path fails open. A hook that exits non-zero, prints to stdout, or hangs
-# is a hook that interferes with the developer's session, and this tool is not
-# permitted to be in their way. Silence is the correct failure.
-
-set -u
-
-find_node() {
-  if command -v node >/dev/null 2>&1; then command -v node; return; fi
-  # Version managers, newest first. `ls -t` rather than a sort: names are not
-  # sortable as versions and the newest install is the best guess.
-  for base in "$HOME/.nvm/versions/node" "$HOME/.local/share/fnm/node-versions" "$HOME/.asdf/installs/nodejs"; do
-    [ -d "$base" ] || continue
-    for dir in $(ls -t "$base" 2>/dev/null); do
-      for candidate in "$base/$dir/bin/node" "$base/$dir/installation/bin/node"; do
-        [ -x "$candidate" ] && { echo "$candidate"; return; }
-      done
-    done
-  done
-  for candidate in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
-    [ -x "$candidate" ] && { echo "$candidate"; return; }
-  done
-}
-
-NODE="$(find_node)"
-[ -n "${NODE:-}" ] || exit 0
+# Every path fails open. A hook that exits non-zero, prints to stdout, or hangs is
+# a hook that interferes with the developer's session, and this tool is not
+# permitted to be in their way. No binary for this platform means no Flueny on
+# this machine, silently, never an error in the editor.
 
 ROOT="${CLAUDE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-}}"
+[ -n "$ROOT" ] || ROOT="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
 [ -n "$ROOT" ] || exit 0
 
-exec "$NODE" "$ROOT/src/cli.ts" hook "$1"
+# One uname for both halves: every process this wrapper spawns is paid on every
+# tool call.
+case "$(uname -sm 2>/dev/null)" in
+  "Darwin arm64") target=darwin-arm64 ;;
+  "Darwin x86_64") target=darwin-x64 ;;
+  "Linux x86_64"|"Linux amd64") target=linux-x64 ;;
+  "Linux aarch64"|"Linux arm64") target=linux-arm64 ;;
+  MINGW*x86_64|MSYS*x86_64|CYGWIN*x86_64) target=windows-x64.exe ;;
+  *) exit 0 ;;
+esac
+
+BIN="$ROOT/bin/flueny-$target"
+[ -x "$BIN" ] || exit 0
+
+exec "$BIN" hook "${1:-}" 2>/dev/null
