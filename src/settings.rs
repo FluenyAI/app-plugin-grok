@@ -188,6 +188,6 @@ mod version_tests {
                 .and_then(serde_json::Value::as_str);
             assert_eq!(version, Some(env!("CARGO_PKG_VERSION")), "{file}");
         }
-        assert_eq!(crate::api::CLIENT_VERSION, "0.2.0");
+        assert_eq!(crate::api::CLIENT_VERSION, "0.2.1");
     }
 }

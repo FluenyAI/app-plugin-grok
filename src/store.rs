@@ -79,6 +79,20 @@ impl Store {
         );
     }
 
+    // ---- the most recent handshake, for `flueny status` ----
+    //
+    // A session that cannot handshake sends nothing, and before this record the
+    // only trace was a reason inside one session file. `status` reads this so a
+    // developer told "Connected" can also see that the last session start failed.
+
+    pub fn read_last_handshake(&self) -> Option<LastHandshake> {
+        read_json(&self.path("last-handshake.json"))
+    }
+
+    pub fn write_last_handshake(&self, record: &LastHandshake) {
+        write_json(&self.path("last-handshake.json"), record);
+    }
+
     // ---- per-session state ----
 
     fn session_path(&self, session_id: &str) -> PathBuf {
@@ -334,6 +348,24 @@ pub struct SessionState {
     pub turn_seq: i64,
     pub files: BTreeMap<String, FileTrack>,
     pub last_commit_files: Vec<String>,
+    // Set only when the handshake got no usable answer (no response, a timeout,
+    // 408, 429 or a 5xx). The session stays inert but a later hook tries again
+    // from this time (epoch ms), so one blip at SessionStart no longer mutes a
+    // session that can run for hours. None means there is nothing to retry.
+    pub handshake_retry_at: Option<i64>,
+    pub handshake_failures: u32,
+}
+
+/// The outcome of the latest handshake attempt on this machine. Holds a status
+/// code and a short error class, never a URL, a token or a response body.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LastHandshake {
+    pub at: i64,
+    pub ok: bool,
+    pub status: u16,
+    pub error: Option<String>,
+    pub retry_at: Option<i64>,
 }
 
 /// The current agent turn, from one Stop to the next.

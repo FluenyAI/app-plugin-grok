@@ -19,13 +19,13 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
-use crate::api::{CLIENT_VERSION, HttpResult, current_token, is_ok, refresh, session_start};
+use crate::api::{CLIENT_VERSION, HOOK_TIMEOUT_MS, HttpResult, current_token, is_ok, refresh, session_start};
 use crate::context::Ctx;
 use crate::credentials::Credentials;
 use crate::git::find_repo;
 use crate::reads::reads_locally_declaration;
 use crate::repo_id::repo_id_for;
-use crate::store::SessionState;
+use crate::store::{LastHandshake, SessionState};
 use crate::time::now_ms;
 use crate::types::{PolicyBundle, SessionStartResponse};
 
@@ -43,7 +43,18 @@ pub struct BeginResult {
     pub bundle_source: BundleSource,
 }
 
+// A retry runs on a PostToolUse, Stop or SessionEnd hook, which the developer is
+// waiting on, so it gets less time than the SessionStart attempt. A healthy
+// handshake takes well under half a second.
+const RETRY_TIMEOUT_MS: u64 = 1500;
+const RETRY_FIRST_DELAY_MS: i64 = 60_000;
+const RETRY_MAX_DELAY_MS: i64 = 600_000;
+
 pub fn begin_session(ctx: &Ctx, session_id: &str, cwd: &Path) -> BeginResult {
+    begin_attempt(ctx, session_id, cwd, 0, HOOK_TIMEOUT_MS)
+}
+
+fn begin_attempt(ctx: &Ctx, session_id: &str, cwd: &Path, prior_failures: u32, timeout_ms: u64) -> BeginResult {
     let repo = find_repo(cwd);
     let repo_id = repo
         .as_ref()
@@ -73,25 +84,52 @@ pub fn begin_session(ctx: &Ctx, session_id: &str, cwd: &Path) -> BeginResult {
     };
 
     let cached = ctx.store.read_bundle();
-    let (mut res, creds) = run_handshake(ctx, creds, session_id, cached.as_ref().map(|b| b.etag.clone()));
+    let (mut res, creds) = run_handshake(
+        ctx,
+        creds,
+        session_id,
+        cached.as_ref().map(|b| b.etag.clone()),
+        timeout_ms,
+    );
     let Some(mut answer) = res
         .body
         .as_ref()
         .filter(|_| is_ok(res.status))
         .and_then(SessionStartResponse::from_value)
     else {
-        // A handshake that did not answer is not a reason to guess. Inert,
-        // quietly, and the next session tries again.
+        // A handshake that did not answer is not a reason to guess, so the
+        // session is inert. When the failure is transient (no answer, a timeout,
+        // load shedding, a 5xx) a later hook in this same session tries again,
+        // with backoff, instead of muting a session that can run for hours.
+        let error = describe_failure(&res);
+        let failures = prior_failures + 1;
+        let retry_at = retryable(res.status).then(|| now_ms() + retry_delay_ms(failures));
+        ctx.store.write_last_handshake(&LastHandshake {
+            at: now_ms(),
+            ok: false,
+            status: res.status,
+            error: Some(error.clone()),
+            retry_at,
+        });
         return finish(
             ctx,
             SessionState {
-                inert_reason: Some(format!("handshake unavailable ({})", res.status)),
+                inert_reason: Some(format!("handshake unavailable ({error})")),
+                handshake_retry_at: retry_at,
+                handshake_failures: failures,
                 ..base
             },
             None,
             BundleSource::None,
         );
     };
+    ctx.store.write_last_handshake(&LastHandshake {
+        at: now_ms(),
+        ok: true,
+        status: res.status,
+        error: None,
+        retry_at: None,
+    });
 
     let mut bundle_source = BundleSource::None;
     let mut bundle: Option<PolicyBundle> = answer.bundle.clone();
@@ -107,7 +145,7 @@ pub fn begin_session(ctx: &Ctx, session_id: &str, cwd: &Path) -> BeginResult {
         // Null bundle with nothing cached is exactly the shape a stale or
         // hand-edited etag produces, and the failure is silent: no classifier means
         // every pathClass is null. So ask once more with no etag rather than run blind.
-        res = run_handshake(ctx, creds, session_id, None).0;
+        res = run_handshake(ctx, creds, session_id, None, timeout_ms).0;
         if let Some(retry) = res
             .body
             .as_ref()
@@ -182,19 +220,60 @@ pub fn handshake_request(ctx: &Ctx, session_id: &str, bundle_etag: Option<String
 // way, and a 401 there is the ONE failure this surface deliberately shows a client.
 // Without this retry a rejected token makes the client inert for every session
 // after it, silently, because the clock-based refresh still thinks it is fine.
-fn run_handshake(ctx: &Ctx, creds: Credentials, session_id: &str, etag: Option<String>) -> (HttpResult, Credentials) {
+fn run_handshake(
+    ctx: &Ctx,
+    creds: Credentials,
+    session_id: &str,
+    etag: Option<String>,
+    timeout_ms: u64,
+) -> (HttpResult, Credentials) {
     let request = handshake_request(ctx, session_id, etag);
-    let res = session_start(&creds.api_url, &creds.access_token, &request);
+    let res = session_start(&creds.api_url, &creds.access_token, &request, timeout_ms);
     if res.status != 401 {
         return (res, creds);
     }
     match refresh(ctx, &creds, ctx.agent) {
         Some(renewed) => (
-            session_start(&renewed.api_url, &renewed.access_token, &request),
+            session_start(&renewed.api_url, &renewed.access_token, &request, timeout_ms),
             renewed,
         ),
         None => (res, creds),
     }
+}
+
+/// Worth trying again later in the same session. A 401 that survived a refresh,
+/// a 403 or a 400 will not fix itself in a minute, so those stay inert.
+fn retryable(status: u16) -> bool {
+    status == 0 || status == 408 || status == 429 || status >= 500
+}
+
+/// 1, 2, 4, 8 minutes, then every 10.
+fn retry_delay_ms(failures: u32) -> i64 {
+    let doublings = failures.saturating_sub(1).min(8);
+    (RETRY_FIRST_DELAY_MS << doublings).min(RETRY_MAX_DELAY_MS)
+}
+
+/// A short, fixed-vocabulary class for `status` and the session file: never the
+/// URL, a header or a response body.
+pub fn describe_failure(res: &HttpResult) -> String {
+    if res.status != 0 {
+        return format!("HTTP {}", res.status);
+    }
+    let text = res.text.to_lowercase();
+    let class = if text.contains("timeout") || text.contains("timed out") {
+        "timed out"
+    } else if text.contains("dns") || text.contains("resolve") || text.contains("lookup") {
+        "DNS lookup failed"
+    } else if text.contains("refused") {
+        "connection refused"
+    } else if text.contains("tls") || text.contains("certificate") || text.contains("handshake") {
+        "TLS error"
+    } else if text.contains("reset") || text.contains("closed") || text.contains("eof") {
+        "connection dropped"
+    } else {
+        "no response"
+    };
+    class.to_string()
 }
 
 fn finish(
@@ -214,11 +293,24 @@ fn finish(
 /// Hooks fire in whatever order the host runs them, and the plugin can be
 /// installed halfway through a session, so every later hook has to cope with no
 /// state on disk. It handshakes rather than assuming.
+///
+/// A session left inert by a transient handshake failure is retried here once
+/// its `handshake_retry_at` has passed. The next retry time is written before
+/// the attempt, so hooks that fire together (parallel tool calls) do not all
+/// make the same request.
 pub fn ensure_session(ctx: &Ctx, session_id: &str, cwd: &Path) -> SessionState {
-    if let Some(existing) = ctx.store.read_session(session_id) {
+    let Some(mut existing) = ctx.store.read_session(session_id) else {
+        return begin_session(ctx, session_id, cwd).state;
+    };
+    let due = existing.inert && existing.handshake_retry_at.is_some_and(|at| now_ms() >= at);
+    if !due {
         return existing;
     }
-    begin_session(ctx, session_id, cwd).state
+    let failures = existing.handshake_failures;
+    existing.handshake_retry_at = Some(now_ms() + retry_delay_ms(failures + 1));
+    ctx.store.write_session(&mut existing);
+    let retry_cwd = existing.repo_root.as_deref().map(Path::new).unwrap_or(cwd);
+    begin_attempt(ctx, session_id, retry_cwd, failures, RETRY_TIMEOUT_MS).state
 }
 
 pub fn classifier_for(ctx: &Ctx) -> Map<String, Value> {
@@ -310,9 +402,9 @@ mod tests {
         assert!(!state.inert);
         assert_eq!(state.inert_reason, None);
         assert_eq!(state.repo_id, Some(repo_id_for(REMOTE)));
-        // The handshake carried the attribution and the 0.2.0 client version.
+        // The handshake carried the attribution and the client version.
         let start = &server.calls_to("/session/start")[0];
-        assert_eq!(start.body["clientVersion"], "0.2.0");
+        assert_eq!(start.body["clientVersion"], CLIENT_VERSION);
         assert_eq!(start.body["agent"], "claude-code");
         assert_eq!(start.body["readsLocally"], json!(reads_locally_declaration()));
     }
@@ -424,7 +516,152 @@ mod tests {
         env.connect(&server.url);
         let state = begin_session(&env.ctx, "dead-token", &repo).state;
         assert!(state.inert);
-        assert!(state.inert_reason.unwrap().contains("handshake unavailable (401)"));
+        assert!(state.inert_reason.unwrap().contains("handshake unavailable (HTTP 401)"));
+        // A dead credential will not fix itself in a minute: no retry, and
+        // status says to reconnect.
+        assert_eq!(state.handshake_retry_at, None);
+        let last = env.ctx.store.read_last_handshake().unwrap();
+        assert!(!last.ok);
+        assert_eq!(last.status, 401);
+        assert_eq!(last.retry_at, None);
+    }
+
+    #[test]
+    fn a_transient_handshake_failure_is_retried_later_in_the_same_session() {
+        // The 2026-10-02 incident: staging did not answer at 11:59, the session
+        // went inert at SessionStart and stayed silent for hours although the
+        // server was back within minutes.
+        let env = TestEnv::new();
+        let repo = env.make_repo(REMOTE);
+        let up = Arc::new(AtomicUsize::new(0));
+        let server = MockServer::start({
+            let up = up.clone();
+            move |path, _| {
+                if path.ends_with("/session/start") && up.load(Ordering::SeqCst) == 0 {
+                    return Reply::Drop;
+                }
+                if path.ends_with("/session/start") {
+                    return Reply::Json(201, handshake_body(json!({ "repoAllowlist": [repo_id_for(REMOTE)] })));
+                }
+                Reply::Json(202, json!({}))
+            }
+        });
+        env.connect(&server.url);
+
+        let state = begin_session(&env.ctx, "blip", &repo).state;
+        assert!(state.inert);
+        assert_eq!(state.handshake_failures, 1);
+        let retry_at = state.handshake_retry_at.expect("a dropped handshake is retried");
+        let wait = retry_at - now_ms();
+        assert!(
+            (55_000..=60_000).contains(&wait),
+            "first retry is about a minute out, got {wait}"
+        );
+        assert!(state.inert_reason.unwrap().contains("handshake unavailable"));
+        let last = env.ctx.store.read_last_handshake().unwrap();
+        assert!(!last.ok);
+        assert_eq!(last.status, 0);
+        assert_eq!(last.retry_at, Some(retry_at));
+
+        // Before the retry time, a hook does not touch the network for it.
+        up.store(1, Ordering::SeqCst);
+        assert_eq!(on_post_tool_use(&env.ctx, &edit_payload("blip", &repo), false).sent, 0);
+        assert_eq!(server.calls_to("/session/start").len(), 1);
+
+        // Once it is due, the next hook handshakes again and the session goes live.
+        let mut due = env.ctx.store.read_session("blip").unwrap();
+        due.handshake_retry_at = Some(now_ms() - 1);
+        env.ctx.store.write_session(&mut due);
+        let outcome = on_post_tool_use(&env.ctx, &edit_payload("blip", &repo), false);
+        assert!(!outcome.inert, "the retried handshake should make the session live");
+        assert_eq!(server.calls_to("/session/start").len(), 2);
+        let live = env.ctx.store.read_session("blip").unwrap();
+        assert!(!live.inert);
+        assert_eq!(live.handshake_retry_at, None);
+        assert!(env.ctx.store.read_last_handshake().unwrap().ok);
+    }
+
+    #[test]
+    fn a_failed_retry_backs_off_and_is_claimed_before_it_runs() {
+        let env = TestEnv::new();
+        let repo = env.make_repo(REMOTE);
+        let server = MockServer::start(|_, _| Reply::Json(503, json!({})));
+        env.connect(&server.url);
+        begin_session(&env.ctx, "still-down", &repo);
+
+        let mut due = env.ctx.store.read_session("still-down").unwrap();
+        due.handshake_retry_at = Some(now_ms() - 1);
+        env.ctx.store.write_session(&mut due);
+        let state = ensure_session(&env.ctx, "still-down", &repo);
+        assert!(state.inert);
+        assert_eq!(state.handshake_failures, 2);
+        let wait = state.handshake_retry_at.unwrap() - now_ms();
+        assert!(
+            (115_000..=120_000).contains(&wait),
+            "second retry is two minutes out, got {wait}"
+        );
+        assert!(state.inert_reason.unwrap().contains("HTTP 503"));
+        assert_eq!(server.calls_to("/session/start").len(), 2);
+    }
+
+    #[test]
+    fn retry_delays_double_and_cap_at_ten_minutes() {
+        let minutes: Vec<i64> = (1..=7).map(|n| retry_delay_ms(n) / 60_000).collect();
+        assert_eq!(minutes, vec![1, 2, 4, 8, 10, 10, 10]);
+        assert_eq!(retry_delay_ms(u32::MAX), RETRY_MAX_DELAY_MS);
+    }
+
+    #[test]
+    fn only_transient_statuses_are_retried() {
+        for status in [0, 408, 429, 500, 502, 503, 504] {
+            assert!(retryable(status), "{status} should be retried");
+        }
+        for status in [400, 401, 403, 404] {
+            assert!(!retryable(status), "{status} should not be retried");
+        }
+    }
+
+    #[test]
+    fn a_failure_is_described_by_class_never_by_raw_text() {
+        let fail = |status: u16, text: &str| HttpResult {
+            status,
+            body: None,
+            text: text.to_string(),
+        };
+        assert_eq!(describe_failure(&fail(0, "Timeout: global")), "timed out");
+        assert_eq!(
+            describe_failure(&fail(0, "dns failed to resolve host")),
+            "DNS lookup failed"
+        );
+        assert_eq!(
+            describe_failure(&fail(0, "Connection refused (os error 61)")),
+            "connection refused"
+        );
+        assert_eq!(describe_failure(&fail(0, "rustls: invalid certificate")), "TLS error");
+        assert_eq!(
+            describe_failure(&fail(0, "connection reset by peer")),
+            "connection dropped"
+        );
+        assert_eq!(
+            describe_failure(&fail(0, "https://api.flueny.dev/secret?x")),
+            "no response"
+        );
+        assert_eq!(describe_failure(&fail(503, "")), "HTTP 503");
+    }
+
+    #[test]
+    fn a_successful_handshake_is_recorded_for_status() {
+        let env = TestEnv::new();
+        let repo = env.make_repo(REMOTE);
+        let server = MockServer::start(|_, _| {
+            Reply::Json(201, handshake_body(json!({ "repoAllowlist": [repo_id_for(REMOTE)] })))
+        });
+        env.connect(&server.url);
+        begin_session(&env.ctx, "recorded", &repo);
+        let last = env.ctx.store.read_last_handshake().unwrap();
+        assert!(last.ok);
+        assert_eq!(last.status, 201);
+        assert_eq!(last.error, None);
     }
 
     #[test]

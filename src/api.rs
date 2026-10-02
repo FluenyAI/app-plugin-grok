@@ -139,13 +139,13 @@ pub fn refresh(ctx: &Ctx, creds: &Credentials, agent: AgentId) -> Option<Credent
 
 // ---- the client-facing endpoints ----
 
-pub fn session_start(base: &str, token: &str, request: &Value) -> HttpResult {
+pub fn session_start(base: &str, token: &str, request: &Value, timeout_ms: u64) -> HttpResult {
     post(
         base,
         "/integrations/coding/session/start",
         Some(token),
         request,
-        HOOK_TIMEOUT_MS,
+        timeout_ms,
     )
 }
 
