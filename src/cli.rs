@@ -11,8 +11,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::api::{
-    CLIENT_VERSION, DEFAULT_API_URL, DEFAULT_CLIENT_ID, current_token, exchange_device_code, is_ok, session_start,
-    start_device,
+    CLIENT_VERSION, DEFAULT_API_URL, DEFAULT_CLIENT_ID, HOOK_TIMEOUT_MS, current_token, exchange_device_code, is_ok,
+    session_start, start_device,
 };
 use crate::api_url::{API_TARGETS, describe_api, resolve_api_target};
 use crate::context::Ctx;
@@ -22,7 +22,8 @@ use crate::hooks::{on_post_tool_use, on_session_end, on_session_start, on_stop};
 use crate::receipt::receipt_for;
 use crate::session::handshake_request;
 use crate::settings::settings_fragment;
-use crate::time::{day, now_ms, parse_iso, today};
+use crate::store::LastHandshake;
+use crate::time::{day, iso, now_ms, parse_iso, today};
 use crate::types::AgentId;
 
 pub fn main(args: Vec<String>) -> i32 {
@@ -267,7 +268,7 @@ fn after_login(ctx: &Ctx, creds: &Credentials, verification_uri: &str, location:
         &format!("setup-{}", now_ms()),
         ctx.store.read_bundle().map(|b| b.etag),
     );
-    let res = session_start(&creds.api_url, &creds.access_token, &request);
+    let res = session_start(&creds.api_url, &creds.access_token, &request, HOOK_TIMEOUT_MS);
     let body = res.body.unwrap_or(Value::Null);
     let dry_run = body.get("dryRun").and_then(Value::as_bool) == Some(true);
     let days = days_until(body.get("dryRunEndsAt").and_then(Value::as_str));
@@ -309,6 +310,36 @@ fn logout(ctx: &Ctx) -> i32 {
         say(&format!("Still connected: {}.", labels(&remaining)));
     }
     0
+}
+
+/// "Connected" only says a credential exists. This line says whether the last
+/// session start actually reached Flueny, because a session whose handshake
+/// failed sends nothing until a retry succeeds.
+fn last_handshake_line(record: Option<LastHandshake>) -> String {
+    let Some(record) = record else {
+        return "none yet".to_string();
+    };
+    if record.ok {
+        return format!("ok at {}", minute(record.at));
+    }
+    let error = record.error.unwrap_or_else(|| "no response".to_string());
+    match record.retry_at {
+        Some(at) => format!(
+            "FAILED at {} ({error}). That session sends nothing until a retry succeeds, next from {}",
+            minute(record.at),
+            minute(at)
+        ),
+        None => format!(
+            "FAILED at {} ({error}). Not retried: reconnect with flueny login if it persists",
+            minute(record.at)
+        ),
+    }
+}
+
+/// `2026-10-02 09:59 UTC`: a status line wants the minute, not milliseconds.
+fn minute(ms: i64) -> String {
+    let stamp = iso(ms);
+    format!("{} UTC", stamp[..16].replace('T', " "))
 }
 
 fn labels(agents: &[AgentId]) -> String {
@@ -380,6 +411,7 @@ fn status(ctx: &Ctx) -> i32 {
                 .map(|b| format!("etag {}, schema {}", b.etag, b.schema_version))
                 .unwrap_or_else(|| "not cached yet".into())
         ),
+        format!("Last handshake   {}", last_handshake_line(store.read_last_handshake())),
         format!("Queued events    {}", store.read_queue().len()),
         format!("Observed today   {}", counters.observed),
         format!("Sent today       {}", counters.would_send),
@@ -592,6 +624,38 @@ mod tests {
             Some("staging")
         );
         assert_eq!(positional(&args(&["--agent", "grok-build"])), None);
+    }
+
+    #[test]
+    fn the_last_handshake_line_says_when_a_session_is_muted() {
+        assert_eq!(last_handshake_line(None), "none yet");
+        let at = parse_iso("2026-10-02T09:59:56Z").unwrap();
+        let ok = LastHandshake {
+            at,
+            ok: true,
+            status: 201,
+            error: None,
+            retry_at: None,
+        };
+        assert_eq!(last_handshake_line(Some(ok)), "ok at 2026-10-02 09:59 UTC");
+        let retrying = LastHandshake {
+            at,
+            ok: false,
+            status: 0,
+            error: Some("timed out".into()),
+            retry_at: Some(at + 60_000),
+        };
+        let line = last_handshake_line(Some(retrying));
+        assert!(line.starts_with("FAILED at 2026-10-02 09:59 UTC (timed out)"), "{line}");
+        assert!(line.contains("sends nothing until a retry succeeds"), "{line}");
+        let dead = LastHandshake {
+            at,
+            ok: false,
+            status: 401,
+            error: Some("HTTP 401".into()),
+            retry_at: None,
+        };
+        assert!(last_handshake_line(Some(dead)).contains("reconnect with flueny login"));
     }
 
     #[test]
