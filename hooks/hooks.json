@@ -1,5 +1,5 @@
 {
-  "description": "Flueny's sensor. Extraction runs on this machine and only derived signal is sent: no prompt text, no code, no file contents, no tool output. Every hook is type command for that reason, because an http hook would post the raw payload off the machine. Hooks fail open and print nothing, so a Flueny outage never interferes with a session.",
+  "description": "Flueny's sensor. Extraction runs on this machine and only derived signal is sent: no prompt text, no code, no file contents, no tool output. Every hook is type command for that reason, because an http hook would post the raw payload off the machine. Hooks fail open and print nothing, so a Flueny outage never interferes with a session. PostToolUseFailure is where Claude Code reports a command that exited non-zero, which is how a failing test run is seen; Grok accepts the same event name.",
   "hooks": {
     "SessionStart": [
       {
@@ -18,6 +18,18 @@
           {
             "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/flueny-hook.sh\" post-tool-use",
+            "timeout": 10
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/flueny-hook.sh\" post-tool-use-failure",
             "timeout": 10
           }
         ],

@@ -1,0 +1,122 @@
+# Builds the five client binaries and commits them to bin/.
+#
+# Marketplace install is a git clone, so nothing can compile on a developer's
+# machine: the binaries the hooks run are the ones committed here (feature 0126,
+# decision of 2026-10-02). This workflow is how they stay current.
+#
+#   workflow_dispatch  on a branch: commits the rebuilt binaries to that branch.
+#   a tag (v*)         builds the tagged source, commits to chore/binaries-<tag>,
+#                      and opens a PR, so nothing is ever pushed to main directly.
+
+name: binaries
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: binaries-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { name: darwin-arm64, os: macos-14, target: aarch64-apple-darwin, test: true }
+          # Cross from Apple silicon: Apple's toolchain builds x86_64 reliably, and
+          # Intel macOS runners are being retired.
+          - { name: darwin-x64, os: macos-14, target: x86_64-apple-darwin, test: false }
+          # Static musl builds, so one binary runs on any distribution and needs no
+          # libdbus (the Secret Service client is pure Rust).
+          - { name: linux-x64, os: ubuntu-24.04, target: x86_64-unknown-linux-musl, test: true }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, test: true }
+          - { name: windows-x64, os: windows-2022, target: x86_64-pc-windows-msvc, test: false, exe: .exe }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+      - if: startsWith(matrix.os, 'ubuntu')
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - if: matrix.test
+        run: cargo test --locked
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Check the version the binary reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/flueny${{ matrix.exe }}"
+          want="flueny $(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "${{ matrix.name }}" != darwin-x64 ]; then
+            got="$("$bin" --version)"
+            [ "$got" = "$want" ] || { echo "binary says $got, Cargo.toml says $want"; exit 1; }
+          fi
+          mkdir -p dist
+          cp "$bin" "dist/flueny-${{ matrix.name }}${{ matrix.exe }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flueny-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  commit:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Place the binaries in bin/
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          find artifacts -type f -name 'flueny-*' -exec cp {} bin/ \;
+          chmod +x bin/flueny-*
+          (cd bin && sha256sum flueny-* > SHA256SUMS)
+          ls -la bin
+          test "$(ls bin/flueny-* | wc -l)" -eq 5
+      - name: Commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "flueny-release-bot"
+          git config user.email "release-bot@flueny.ai"
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "${{ github.ref_type }}" = tag ]; then
+            branch="chore/binaries-${{ github.ref_name }}"
+            git checkout -b "$branch"
+          else
+            branch="${{ github.ref_name }}"
+            if [ "$branch" = main ]; then
+              branch="chore/binaries-$version-$(git rev-parse --short HEAD)"
+              git checkout -b "$branch"
+            fi
+          fi
+          git add bin/
+          if git diff --cached --quiet; then
+            echo "bin/ is already current"
+            exit 0
+          fi
+          git commit -m "chore(bin): rebuild the client binaries for $version" \
+            -m "Built by the binaries workflow from $(git rev-parse --short HEAD) on ${{ github.ref_name }}."
+          git push origin "HEAD:$branch"
+          if [ "$branch" != "${{ github.ref_name }}" ]; then
+            gh pr create --base main --head "$branch" \
+              --title "chore(bin): client binaries for $version" \
+              --body "Binaries rebuilt by the binaries workflow for ${{ github.ref_name }}. SHA256SUMS is in bin/."
+          fi

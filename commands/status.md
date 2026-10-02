@@ -14,7 +14,7 @@ silent.
 1. Run the client's own check:
 
    ```sh
-   node "${CLAUDE_PLUGIN_ROOT}/src/cli.ts" status
+   sh "${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/flueny.sh" status
    ```
 
 2. Read the result against these links, in order, and report the FIRST broken
