@@ -106,8 +106,16 @@ pub fn sweep_prompt_insight_turns(transcript: &Path, line_offset: usize) -> Prom
     }
 }
 
+// class-validator's MaxLength counts UTF-16 code units, as JavaScript does, so the
+// cap is applied in the same unit: an emoji is two of them.
 fn cap(text: &str) -> String {
-    text.chars().take(MAX_TEXT_CHARS).collect()
+    let mut units = 0;
+    text.chars()
+        .take_while(|c| {
+            units += c.len_utf16();
+            units <= MAX_TEXT_CHARS
+        })
+        .collect()
 }
 
 fn content(line: &Value) -> Option<&Value> {
@@ -324,6 +332,13 @@ mod tests {
                 turn("second task", "did the second thing")
             ]
         );
+    }
+
+    #[test]
+    fn the_cap_counts_utf16_units_as_the_backend_does() {
+        let capped = cap(&"\u{1F600}".repeat(15_000));
+        assert_eq!(capped.encode_utf16().count(), MAX_TEXT_CHARS);
+        assert_eq!(cap("short"), "short");
     }
 
     #[test]
