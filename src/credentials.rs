@@ -13,6 +13,15 @@
 // Migration: a credential the TS client left in `credentials.<agent>.json` (or the
 // older single `credentials.json`) moves into the store the first time it is read
 // with a store available, and the file is deleted.
+//
+// The hook token is also cached in `token.<agent>.json` (0600), without the
+// refresh token, whenever the credential is in a store. Every tool call starts a
+// fresh hook process, and an unsigned or ad hoc signed binary has no stable
+// identity for "Always Allow", so reading the Keychain on every hook meant a
+// Keychain prompt on every tool call, and a prompt left waiting dropped events.
+// The hook token is short lived and can only write events, so a 0600 copy costs
+// little; the refresh token, which can mint new ones, never leaves the store.
+// Hooks read the cache and go to the store only to refresh.
 
 use std::collections::HashMap;
 use std::fs;
@@ -230,6 +239,31 @@ impl CredentialStore {
         self.store.path("credentials.json")
     }
 
+    fn token_path(&self, agent: AgentId) -> PathBuf {
+        self.store.path(&format!("token.{}.json", agent.as_str()))
+    }
+
+    /// The cached hook token, with an empty refresh token. Only kept while the
+    /// credential itself is in a store: with no store the credential file already
+    /// holds everything, and a second copy would be pointless.
+    pub fn read_hook_token(&self, agent: AgentId) -> Option<Credentials> {
+        self.backend.as_ref()?;
+        read_json(&self.token_path(agent))
+    }
+
+    /// Caches the hook token for later hooks, never the refresh token.
+    pub fn cache_hook_token(&self, creds: &Credentials, agent: AgentId) {
+        if self.backend.is_none() {
+            return;
+        }
+        let cached = Credentials {
+            agent: Some(agent),
+            refresh_token: String::new(),
+            ..creds.clone()
+        };
+        write_json(&self.token_path(agent), &cached);
+    }
+
     pub fn read(&self, agent: AgentId) -> Option<Credentials> {
         self.migrate_legacy();
         self.read_located(agent).map(|(creds, _)| creds)
@@ -295,8 +329,12 @@ impl CredentialStore {
             && backend.set(agent.as_str(), &secret).is_ok()
         {
             let _ = fs::remove_file(&file);
+            self.cache_hook_token(&stored, agent);
             return Location::System(backend.name());
         }
+        // The store refused: the file holds the whole credential, so a cached token
+        // would only go stale next to it.
+        let _ = fs::remove_file(self.token_path(agent));
         write_json(&file, &stored);
         Location::File(file)
     }
@@ -310,6 +348,7 @@ impl CredentialStore {
             let _ = backend.delete(agent.as_str());
         }
         let _ = fs::remove_file(self.file_path(agent));
+        let _ = fs::remove_file(self.token_path(agent));
     }
 
     pub fn list_agents(&self) -> Vec<AgentId> {
@@ -499,7 +538,43 @@ mod tests {
         store.write(&creds("t"), AgentId::ClaudeCode);
         store.clear(AgentId::ClaudeCode);
         assert_eq!(store.read(AgentId::ClaudeCode), None);
+        assert_eq!(store.read_hook_token(AgentId::ClaudeCode), None);
+        assert!(!store.token_path(AgentId::ClaudeCode).exists());
         assert!(store.list_agents().is_empty());
+    }
+
+    #[test]
+    fn a_stored_credential_caches_the_hook_token_but_never_the_refresh_token() {
+        let (_dir, store, _memory) = with_store(false);
+        store.write(&creds("hook"), AgentId::ClaudeCode);
+        let cached = store.read_hook_token(AgentId::ClaudeCode).unwrap();
+        assert_eq!(cached.access_token, "hook");
+        assert_eq!(cached.refresh_token, "");
+        assert_eq!(cached.agent, Some(AgentId::ClaudeCode));
+        let on_disk = fs::read_to_string(store.token_path(AgentId::ClaudeCode)).unwrap();
+        assert!(
+            !on_disk.contains("hook-refresh"),
+            "the refresh token must stay in the store"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(store.token_path(AgentId::ClaudeCode))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // Grok's slot is its own.
+        assert_eq!(store.read_hook_token(AgentId::GrokBuild), None);
+    }
+
+    #[test]
+    fn with_no_store_there_is_no_token_cache() {
+        let (_dir, store, _memory) = with_store(true);
+        store.write(&creds("file-token"), AgentId::ClaudeCode);
+        assert!(!store.token_path(AgentId::ClaudeCode).exists());
+        assert_eq!(store.read_hook_token(AgentId::ClaudeCode), None);
     }
 
     #[test]

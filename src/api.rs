@@ -110,15 +110,36 @@ pub fn exchange_refresh_token(base: &str, client_id: &str, refresh_token: &str) 
     )
 }
 
+fn fresh(creds: &Credentials) -> bool {
+    creds.expires_at - REFRESH_MARGIN_MS > now_ms()
+}
+
+/// The hook token, from the 0600 cache while it is fresh, so a hook only touches
+/// the OS store (and can only raise a Keychain prompt) when it has to refresh.
 pub fn current_token(ctx: &Ctx, agent: AgentId) -> Option<Credentials> {
+    if let Some(cached) = ctx.creds.read_hook_token(agent)
+        && fresh(&cached)
+    {
+        return Some(cached);
+    }
     let creds = ctx.creds.read(agent)?;
-    if creds.expires_at - REFRESH_MARGIN_MS > now_ms() {
+    if fresh(&creds) {
+        ctx.creds.cache_hook_token(&creds, agent);
         return Some(creds);
     }
     refresh(ctx, &creds, agent)
 }
 
 pub fn refresh(ctx: &Ctx, creds: &Credentials, agent: AgentId) -> Option<Credentials> {
+    // A token from the cache carries no refresh token: that one only lives in the
+    // store, so read it there.
+    let stored;
+    let creds = if creds.refresh_token.is_empty() {
+        stored = ctx.creds.read(agent)?;
+        &stored
+    } else {
+        creds
+    };
     let res = exchange_refresh_token(&creds.api_url, &creds.client_id, &creds.refresh_token);
     let body = res.body.filter(|_| is_ok(res.status))?;
     let access = body.get("access_token")?.as_str()?.to_string();
@@ -194,7 +215,11 @@ pub fn post_raw_activity(base: &str, token: &str, detail: &Value, timeout_ms: u6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{MockServer, Reply, closed_url};
+    use std::sync::Arc;
+
+    use crate::credentials::{CredentialStore, MemoryBackend};
+    use crate::store::Store;
+    use crate::testing::{MockServer, Reply, TempDir, closed_url};
 
     #[test]
     fn a_201_is_success_and_a_closed_port_is_status_zero() {
@@ -214,5 +239,73 @@ mod tests {
         let server = MockServer::start(|_, _| Reply::Json(202, Value::Null));
         let res = post(&server.url, "/x", None, &json!({}), 1000);
         assert_eq!(res.status, 202);
+    }
+
+    fn ctx_with_memory_store() -> (TempDir, Ctx, MemoryBackend) {
+        let dir = TempDir::new();
+        let store = Store::new(dir.path().join("config"));
+        let memory = MemoryBackend::default();
+        let creds = CredentialStore::new(store.clone(), Some(Arc::new(memory.clone())));
+        let agent = AgentId::ClaudeCode;
+        (dir, Ctx { store, creds, agent }, memory)
+    }
+
+    fn signed_in(api_url: &str, expires_at: i64) -> Credentials {
+        Credentials {
+            api_url: api_url.to_string(),
+            app_url: None,
+            client_id: DEFAULT_CLIENT_ID.into(),
+            access_token: "hook".into(),
+            refresh_token: "stored-refresh".into(),
+            expires_at,
+            agent: None,
+        }
+    }
+
+    #[test]
+    fn a_fresh_cached_token_is_used_without_reading_the_store() {
+        let (_dir, ctx, memory) = ctx_with_memory_store();
+        ctx.creds
+            .write(&signed_in("http://api.test", now_ms() + 3_600_000), ctx.agent);
+        // Every hook is a new process. Empty the store to prove this one never
+        // asks it, which on macOS is what raises the Keychain prompt.
+        memory.entries.lock().unwrap().clear();
+        let fresh_ctx = Ctx {
+            store: ctx.store.clone(),
+            creds: CredentialStore::new(ctx.store.clone(), Some(Arc::new(memory.clone()))),
+            agent: ctx.agent,
+        };
+        let token = current_token(&fresh_ctx, fresh_ctx.agent).unwrap();
+        assert_eq!(token.access_token, "hook");
+        assert_eq!(token.refresh_token, "");
+    }
+
+    #[test]
+    fn a_refresh_from_the_cache_uses_the_stored_refresh_token_and_updates_both() {
+        let server = MockServer::start(|path, _| {
+            if path.ends_with("/oauth/token") {
+                return Reply::Json(
+                    200,
+                    json!({ "access_token": "renewed", "refresh_token": "rotated", "expires_in": 3600 }),
+                );
+            }
+            Reply::Json(404, json!({}))
+        });
+        let (_dir, ctx, _memory) = ctx_with_memory_store();
+        // Expired, so the next hook must refresh.
+        ctx.creds.write(&signed_in(&server.url, now_ms() - 1), ctx.agent);
+        let cached = ctx.creds.read_hook_token(ctx.agent).unwrap();
+        assert_eq!(cached.refresh_token, "");
+
+        let renewed = refresh(&ctx, &cached, ctx.agent).unwrap();
+        assert_eq!(renewed.access_token, "renewed");
+        let sent = &server.calls_to("/oauth/token")[0].body;
+        assert_eq!(sent["refresh_token"], "stored-refresh");
+
+        assert_eq!(ctx.creds.read(ctx.agent).unwrap().refresh_token, "rotated");
+        let recached = ctx.creds.read_hook_token(ctx.agent).unwrap();
+        assert_eq!(recached.access_token, "renewed");
+        assert_eq!(recached.refresh_token, "");
+        assert_eq!(current_token(&ctx, ctx.agent).unwrap().access_token, "renewed");
     }
 }

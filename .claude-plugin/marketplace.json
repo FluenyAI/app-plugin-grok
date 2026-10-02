@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "flueny",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "description": "Measures how you work with Claude Code or Grok and shows it to you first. Derived signal only, no prompts and no code.",
       "author": { "name": "Flueny" },
       "category": "productivity",
